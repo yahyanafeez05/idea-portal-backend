@@ -2655,6 +2655,137 @@ class QueriesWorkspaceBackendTests(TestCase):
         self.assertFalse(Query.objects.filter(id=q.id).exists())
 
 
+class NotificationPanelBackendTests(TestCase):
+    """
+    Comprehensive test suite for the updated Student Dashboard Notification Panel
+    matching screenshot media_1795191141742_a61b9c81.png:
+    - Modal Header:
+      - Title: 'Your notifications'
+      - Subtitle: 'Updates from your project workspace.'
+      - Close icon '✕'
+    - Notification Cards:
+      1. 'Submission status' - 'Your last project is currently under review.' [Node Theory] - '2h ago'
+      2. 'Project update' - 'Your latest project activity is ready to review.' - 'Today'
+      3. 'Teacher reply' - 'Your teacher answered one of your questions.' - 'Yesterday'
+    - Modal Footer buttons: 'Cancel' and 'Close'
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.student = User.objects.create_user(
+            email='student.notif@nodetheory.com',
+            password='Password123!',
+            full_name='Student Notif',
+            account_type=AccountType.STUDENT
+        )
+        self.token = AuthToken.create_for_user(self.student)
+        self.auth = {'HTTP_AUTHORIZATION': f'Bearer {self.token.key}'}
+
+    def test_notification_panel_modal_structure_matching_screenshot(self):
+        """
+        Verify the notification panel response structure matches the new UI modal:
+        - panel_info and modal with title 'Your notifications', subtitle 'Updates from your project workspace.'
+        - Buttons: Cancel and Close
+        """
+        res = self.client.get('/api/notifications/', **self.auth)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data['success'])
+
+        # Modal info
+        self.assertEqual(data['modal']['title'], 'Your notifications')
+        self.assertEqual(data['modal']['subtitle'], 'Updates from your project workspace.')
+        self.assertEqual(data['modal']['cancel_label'], 'Cancel')
+        self.assertEqual(data['modal']['close_label'], 'Close')
+        self.assertTrue(data['modal']['close_icon'])
+
+        # Panel info
+        self.assertEqual(data['panel_info']['title'], 'Your notifications')
+        self.assertEqual(data['panel_info']['subtitle'], 'Updates from your project workspace.')
+        self.assertEqual(data['panel_info']['buttons']['cancel'], 'Cancel')
+        self.assertEqual(data['panel_info']['buttons']['close'], 'Close')
+
+    def test_seed_student_dashboard_notifications_matching_screenshot(self):
+        """
+        Verify seeding and displaying the 3 workspace notifications from screenshot media_1795191141742_a61b9c81.png:
+        1. 'Submission status' - 'Your last project is currently under review.' [Node Theory] (2h ago)
+        2. 'Project update' - 'Your latest project activity is ready to review.' (Today)
+        3. 'Teacher reply' - 'Your teacher answered one of your questions.' (Yesterday)
+        """
+        seed_res = self.client.post('/api/notifications/seed/', **self.auth)
+        self.assertEqual(seed_res.status_code, 201)
+        data = seed_res.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['count'], 3)
+
+        notifs = data['notifications']
+
+        # Card 1: Submission status
+        n1 = notifs[0]
+        self.assertEqual(n1['title'], 'Submission status')
+        self.assertEqual(n1['message'], 'Your last project is currently under review.')
+        self.assertEqual(n1['tag'], 'Node Theory')
+        self.assertEqual(n1['badge'], 'Node Theory')
+        self.assertEqual(n1['time_ago'], '2h ago')
+
+        # Card 2: Project update
+        n2 = notifs[1]
+        self.assertEqual(n2['title'], 'Project update')
+        self.assertEqual(n2['message'], 'Your latest project activity is ready to review.')
+        self.assertEqual(n2['time_ago'], 'Today')
+
+        # Card 3: Teacher reply
+        n3 = notifs[2]
+        self.assertEqual(n3['title'], 'Teacher reply')
+        self.assertEqual(n3['message'], 'Your teacher answered one of your questions.')
+        self.assertEqual(n3['time_ago'], 'Yesterday')
+
+        # Verify GET /api/notifications/panel/ returns all three cards
+        panel_res = self.client.get('/api/notifications/panel/', **self.auth)
+        self.assertEqual(panel_res.status_code, 200)
+        self.assertEqual(panel_res.json()['count'], 3)
+        self.assertEqual(panel_res.json()['unread_count'], 3)
+
+    def test_notification_panel_close_and_mark_all_read(self):
+        """
+        Verify modal close and mark all as read:
+        - Closing with mark_read=true updates all unread notifications to read.
+        - Unread counter drops to 0.
+        """
+        # Seed 3 notifications
+        self.client.post('/api/notifications/seed/', **self.auth)
+        self.assertEqual(Notification.objects.filter(recipient=self.student, is_read=False).count(), 3)
+
+        # Student clicks Close on notification modal
+        close_res = self.client.post('/api/notifications/close/?mark_read=true', **self.auth)
+        self.assertEqual(close_res.status_code, 200)
+        data = close_res.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['unread_count'], 0)
+
+        # Database is updated
+        self.assertEqual(Notification.objects.filter(recipient=self.student, is_read=False).count(), 0)
+
+    def test_create_custom_notification_with_tag(self):
+        """
+        Verify creating notifications with custom tags/badges:
+        - Post notification with tag='Node Theory'
+        - Returns tag and badge in to_dict
+        """
+        payload = {
+            'title': 'Submission status',
+            'message': 'Your project proposal has been received.',
+            'tag': 'Node Theory'
+        }
+        res = self.client.post('/api/notifications/', data=payload, **self.auth)
+        self.assertEqual(res.status_code, 201)
+        data = res.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['notification']['tag'], 'Node Theory')
+        self.assertEqual(data['notification']['badge'], 'Node Theory')
+
+
+
 
 
 

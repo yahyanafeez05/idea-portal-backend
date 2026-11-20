@@ -105,7 +105,7 @@ def _get_time_greeting():
         return "Good night"
 
 
-def create_notification(recipient, title, message, notification_type=NotificationType.INFO, action_url=''):
+def create_notification(recipient, title, message, notification_type=NotificationType.INFO, action_url='', tag=''):
     """Helper to create and persist user notifications."""
     if not recipient:
         return None
@@ -114,7 +114,8 @@ def create_notification(recipient, title, message, notification_type=Notificatio
         title=title,
         message=message,
         notification_type=notification_type,
-        action_url=action_url
+        action_url=action_url,
+        tag=tag
     )
 
 
@@ -3039,19 +3040,76 @@ class DirectChatContactsAPIView(APIView):
 
 
 # ==============================================================================
-# NOTIFICATIONS API (Bell icon in Top Navbar)
+# NOTIFICATIONS API (Bell icon in Top Navbar & Student Dashboard Modal)
 # ==============================================================================
+
+def seed_student_dashboard_notifications(user):
+    """
+    Seeds the 3 workspace notifications from the updated student dashboard notification panel screenshot:
+    1. 'Submission status' - 'Your last project is currently under review.' (tag: 'Node Theory', 2h ago)
+    2. 'Project update' - 'Your latest project activity is ready to review.' (Today)
+    3. 'Teacher reply' - 'Your teacher answered one of your questions.' (Yesterday)
+    """
+    now = timezone.now()
+    n1 = Notification.objects.create(
+        recipient=user,
+        title="Submission status",
+        message="Your last project is currently under review.",
+        notification_type=NotificationType.SUBMISSION_STATUS,
+        action_url="/workspace/projects/",
+        tag="Node Theory",
+        is_read=False,
+    )
+    Notification.objects.filter(id=n1.id).update(created_at=now - timezone.timedelta(hours=2))
+
+    n2 = Notification.objects.create(
+        recipient=user,
+        title="Project update",
+        message="Your latest project activity is ready to review.",
+        notification_type=NotificationType.PROJECT_UPDATE,
+        action_url="/workspace/projects/",
+        tag="",
+        is_read=False,
+    )
+    Notification.objects.filter(id=n2.id).update(created_at=now - timezone.timedelta(hours=5))
+
+    n3 = Notification.objects.create(
+        recipient=user,
+        title="Teacher reply",
+        message="Your teacher answered one of your questions.",
+        notification_type=NotificationType.TEACHER_REPLY,
+        action_url="/workspace/queries/",
+        tag="",
+        is_read=False,
+    )
+    Notification.objects.filter(id=n3.id).update(created_at=now - timezone.timedelta(days=1))
+
 
 class NotificationListAPIView(APIView):
     """
     GET  /api/notifications/
     POST /api/notifications/
+
+    Returns notifications matching the new modal structure in media_1795191141742_a61b9c81.png:
+      - Title: Your notifications
+      - Subtitle: Updates from your project workspace.
+      - Notification cards with:
+        - title ('Submission status', 'Project update', 'Teacher reply')
+        - message ('Your last project is currently under review.')
+        - tag / badge ('Node Theory' badge)
+        - relative time / time_ago ('2h ago', 'Today', 'Yesterday')
+      - Modal actions: Cancel, Close
     """
 
     def get(self, request, *args, **kwargs):
         user = request.user if (request.user and request.user.is_authenticated) else User.objects.first()
         if not user:
             return JsonResponse({'success': False, 'code': 'UNAUTHORIZED', 'error': 'Authentication required.'}, status=401)
+
+        # Allow seeding default screenshot notifications if ?seed=1 or ?init=1
+        if request.GET.get('seed') in ('1', 'true', 'yes') or request.GET.get('init') in ('1', 'true', 'yes'):
+            if not Notification.objects.filter(recipient=user).exists():
+                seed_student_dashboard_notifications(user)
 
         queryset = Notification.objects.filter(recipient=user)
         if request.GET.get('unread') in ('1', 'true', 'True'):
@@ -3062,6 +3120,21 @@ class NotificationListAPIView(APIView):
 
         return JsonResponse({
             'success': True,
+            'panel_info': {
+                'title': 'Your notifications',
+                'subtitle': 'Updates from your project workspace.',
+                'buttons': {
+                    'cancel': 'Cancel',
+                    'close': 'Close',
+                }
+            },
+            'modal': {
+                'title': 'Your notifications',
+                'subtitle': 'Updates from your project workspace.',
+                'cancel_label': 'Cancel',
+                'close_label': 'Close',
+                'close_icon': True,
+            },
             'unread_count': unread_count,
             'count': len(notifications_data),
             'notifications': notifications_data
@@ -3086,7 +3159,8 @@ class NotificationListAPIView(APIView):
             title=title,
             message=message,
             notification_type=data.get('notification_type', NotificationType.INFO),
-            action_url=data.get('action_url', '')
+            action_url=data.get('action_url', ''),
+            tag=data.get('tag', '') or data.get('badge', '')
         )
 
         return JsonResponse({
@@ -3149,6 +3223,66 @@ class NotificationMarkAllReadAPIView(APIView):
             'success': True,
             'message': 'All notifications marked as read.'
         }, status=200)
+
+
+class NotificationCloseAPIView(APIView):
+    """
+    POST /api/notifications/close/
+    POST /api/workspace/notifications/close/
+
+    Triggered when user clicks 'Close' or 'Cancel' on the notifications modal.
+    Optionally marks notifications as read if mark_read=true.
+    """
+
+    def post(self, request, *args, **kwargs):
+        user = request.user if (request.user and request.user.is_authenticated) else User.objects.first()
+        if not user:
+            return JsonResponse({'success': False, 'code': 'UNAUTHORIZED', 'error': 'Authentication required.'}, status=401)
+
+        data = request.data or {}
+        mark_read = (
+            request.GET.get('mark_read', 'false').lower() in ('1', 'true', 'yes') or
+            str(data.get('mark_read', '')).lower() in ('1', 'true', 'yes')
+        )
+        if mark_read:
+            Notification.objects.filter(recipient=user, is_read=False).update(
+                is_read=True,
+                read_at=timezone.now()
+            )
+
+        unread_count = Notification.objects.filter(recipient=user, is_read=False).count()
+        return JsonResponse({
+            'success': True,
+            'message': 'Notification panel closed.',
+            'unread_count': unread_count
+        }, status=200)
+
+
+class NotificationSeedAPIView(APIView):
+    """
+    POST /api/notifications/seed/
+    POST /api/workspace/notifications/seed/
+
+    Seeds the 3 workspace notifications from the screenshot:
+    - Submission status ('Your last project is currently under review.', tag: 'Node Theory', 2h ago)
+    - Project update ('Your latest project activity is ready to review.', Today)
+    - Teacher reply ('Your teacher answered one of your questions.', Yesterday)
+    """
+
+    def post(self, request, *args, **kwargs):
+        user = request.user if (request.user and request.user.is_authenticated) else User.objects.first()
+        if not user:
+            return JsonResponse({'success': False, 'code': 'UNAUTHORIZED', 'error': 'Authentication required.'}, status=401)
+
+        seed_student_dashboard_notifications(user)
+        queryset = Notification.objects.filter(recipient=user)
+
+        return JsonResponse({
+            'success': True,
+            'message': 'Sample student workspace notifications initialized successfully.',
+            'count': queryset.count(),
+            'notifications': [n.to_dict() for n in queryset]
+        }, status=201)
 
 
 # ==============================================================================
@@ -3593,6 +3727,8 @@ message_detail_view = MessageDetailAPIView.as_view()
 notification_list_view = NotificationListAPIView.as_view()
 notification_detail_view = NotificationDetailAPIView.as_view()
 notification_mark_all_read_view = NotificationMarkAllReadAPIView.as_view()
+notification_close_view = NotificationCloseAPIView.as_view()
+notification_seed_view = NotificationSeedAPIView.as_view()
 
 # Topics & Data
 topic_list_view = TopicListAPIView.as_view()

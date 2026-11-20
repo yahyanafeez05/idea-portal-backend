@@ -1086,6 +1086,9 @@ class TeamMessage(models.Model):
 
 class NotificationType(models.TextChoices):
     INFO = 'info', _('Information')
+    SUBMISSION_STATUS = 'submission_status', _('Submission status')
+    PROJECT_UPDATE = 'project_update', _('Project update')
+    TEACHER_REPLY = 'teacher_reply', _('Teacher reply')
     PROJECT_APPROVED = 'project_approved', _('Project Approved')
     PROJECT_FEEDBACK = 'project_feedback', _('Project Feedback')
     PROJECT_REJECTED = 'project_rejected', _('Project Rejected')
@@ -1118,6 +1121,7 @@ class Notification(models.Model):
         default=NotificationType.INFO,
         db_index=True
     )
+    tag = models.CharField(_('Tag / Badge'), max_length=100, blank=True, default='')
     action_url = models.CharField(_('Action URL'), max_length=255, blank=True, default='')
     is_read = models.BooleanField(_('Is Read'), default=False, db_index=True)
     read_at = models.DateTimeField(_('Read At'), null=True, blank=True)
@@ -1132,12 +1136,48 @@ class Notification(models.Model):
         return f"Notification for {self.recipient.email}: {self.title}"
 
     def to_dict(self):
+        now = timezone.now()
+        relative_time = "Just now"
+        if self.created_at:
+            diff = now - self.created_at
+            seconds = int(diff.total_seconds())
+            if seconds < 0:
+                relative_time = "Just now"
+            elif seconds < 60:
+                relative_time = "Just now"
+            elif seconds < 3600:
+                relative_time = f"{seconds // 60}m ago"
+            elif seconds < 86400:
+                if (now.date() - self.created_at.date()).days == 1:
+                    relative_time = "Yesterday"
+                elif seconds <= 4 * 3600:
+                    relative_time = f"{max(1, seconds // 3600)}h ago"
+                else:
+                    relative_time = "Today"
+            elif (now.date() - self.created_at.date()).days == 1:
+                relative_time = "Yesterday"
+            else:
+                days = (now.date() - self.created_at.date()).days
+                if days < 7:
+                    relative_time = f"{days}d ago"
+                else:
+                    relative_time = self.created_at.strftime('%b %d')
+
+        tag_val = self.tag or ("Node Theory" if (self.notification_type in (NotificationType.SUBMISSION_STATUS, 'submission_status') or 'review' in self.message.lower()) else "")
+
         return {
             'id': self.id,
             'title': self.title,
             'message': self.message,
+            'description': self.message,
             'notification_type': self.notification_type,
             'notification_type_display': self.get_notification_type_display(),
+            'tag': tag_val if tag_val else None,
+            'badge': tag_val if tag_val else None,
+            'time_ago': relative_time,
+            'relative_time': relative_time,
+            'formatted_time': self.created_at.strftime('%I:%M %p') if self.created_at else '',
+            'formatted_date': self.created_at.strftime('%b %d, %Y') if self.created_at else '',
             'action_url': self.action_url,
             'is_read': self.is_read,
             'read_at': self.read_at.isoformat() if self.read_at else None,

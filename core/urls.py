@@ -30,12 +30,19 @@ urlpatterns = [
     path('workspace/', views.dashboard_view, name='workspace'),
 
     # -------------------------------------------------------------------------
-    # Notifications API (Top Navbar Bell Icon)
+    # Notifications API (Top Navbar Bell Icon & Student Dashboard Modal)
     # -------------------------------------------------------------------------
     path('notifications/', views.notification_list_view, name='notification-list-create'),
+    path('notifications/panel/', views.notification_list_view, name='notifications-panel'),
+    path('notifications/close/', views.notification_close_view, name='notifications-close'),
+    path('notifications/seed/', views.notification_seed_view, name='notifications-seed'),
     path('notifications/mark-all-read/', views.notification_mark_all_read_view, name='notification-mark-all-read'),
     path('notifications/<int:pk>/read/', views.notification_detail_view, name='notification-mark-read'),
     path('notifications/<int:pk>/', views.notification_detail_view, name='notification-detail'),
+    path('workspace/notifications/', views.notification_list_view, name='workspace-notifications'),
+    path('workspace/notifications/panel/', views.notification_list_view, name='workspace-notifications-panel'),
+    path('workspace/notifications/close/', views.notification_close_view, name='workspace-notifications-close'),
+    path('workspace/notifications/seed/', views.notification_seed_view, name='workspace-notifications-seed'),
 
     # -------------------------------------------------------------------------
     # Projects API (Active projects, Approved, Awaiting feedback, Recent projects)
