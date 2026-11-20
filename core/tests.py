@@ -1,4 +1,5 @@
 import json
+from django.utils import timezone
 from django.test import TestCase, Client
 from django.urls import reverse
 from django.contrib.auth import get_user_model
@@ -2783,6 +2784,1553 @@ class NotificationPanelBackendTests(TestCase):
         self.assertTrue(data['success'])
         self.assertEqual(data['notification']['tag'], 'Node Theory')
         self.assertEqual(data['notification']['badge'], 'Node Theory')
+
+
+class TeacherDashboardBackendTests(TestCase):
+    """
+    Comprehensive tests for the Teacher Dashboard (Workspace / Teacher dashboard):
+    Matches Screenshot (media_1795194377715_47ae962d.jpg):
+    - TEACHER WORKSPACE header & greeting: 'Good morning, gopal'
+    - 'View activity' action button
+    - Hero banner:
+        * Tag: 'YOUR CLASSROOM · DESIGN & TECHNOLOGY'
+        * Title: 'A little feedback goes a long way.'
+        * Subtitle: 'Review submissions and help every student progress.'
+        * Button: 'Review submissions →'
+    - 4 Calculated Metric Stat Cards:
+        * 'Students with submissions' (subtext: 'Student accounts', count formatted '00')
+        * 'Submitted projects' (subtext: 'Across student accounts', count formatted '00')
+        * 'Awaiting review' (subtext: 'Ready for your feedback', count formatted '00')
+        * 'Reviewed' (subtext: 'Projects with a review status', count formatted '00')
+    - 'Submissions to review' widget:
+        * Title: 'Submissions to review'
+        * Subtext: 'Recent work from your students'
+        * Filter: 'All submissions ∨' ('all', 'awaiting_review', 'reviewed')
+        * Empty state: 'No student submissions match this filter yet.'
+    - 'Student questions' widget:
+        * Title: 'Student questions'
+        * Subtext: 'Questions that could use your help'
+        * Link: 'View inbox →'
+        * Item row: dot indicator, 'sample 1', 'Submitted by faris · Nov 20, 2026, 9:11 PM', 'Edit answer' / 'Answer question'
+    - Sidebar navigation badges:
+        * 'Student projects': 0
+        * 'Queries': 1
+    - 'View activity' API timeline endpoint
+    """
+
+    def setUp(self):
+        self.teacher = User.objects.create_user(
+            email='gopal@nodetheory.com',
+            password='TeacherPassword123!',
+            full_name='gopal',
+            account_type=AccountType.TEACHER,
+            department='DESIGN & TECHNOLOGY'
+        )
+        self.teacher_token = AuthToken.create_for_user(self.teacher)
+        self.auth = {'HTTP_AUTHORIZATION': f'Bearer {self.teacher_token.key}'}
+
+        self.student = User.objects.create_user(
+            email='faris@nodetheory.com',
+            password='FarisPassword123!',
+            full_name='faris',
+            account_type=AccountType.STUDENT,
+            department='DESIGN & TECHNOLOGY'
+        )
+
+    def test_teacher_dashboard_empty_state_matches_screenshot(self):
+        """
+        Tests the exact state shown in the teacher dashboard screenshot:
+        - gopal is the teacher
+        - Faris submitted a question 'sample 1'
+        - No projects submitted yet
+        - Stat cards all show 00
+        - Submissions empty state message matches screenshot
+        - Student questions widget lists 'sample 1' with 'Submitted by faris'
+        - Queries badge shows 1, Student projects badge shows 0
+        """
+        # Faris asks query 'sample 1'
+        Query.objects.create(
+            title='sample 1',
+            description='How do we structure our project submission?',
+            asked_by=self.student,
+            status=QueryStatus.OPEN
+        )
+
+        response = self.client.get('/api/workspace/teacher-dashboard/', **self.auth)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['success'])
+
+        # Header & Workspace info
+        workspace = data['workspace']
+        self.assertEqual(workspace['tag'], 'TEACHER WORKSPACE')
+        self.assertEqual(workspace['name'], 'gopal')
+        self.assertIn('gopal', workspace['full_greeting'])
+        self.assertEqual(workspace['subtitle'], "A quick look at your students' project progress.")
+        self.assertEqual(workspace['breadcrumb'], 'Workspace / Teacher dashboard')
+        self.assertEqual(workspace['action_button']['text'], 'View activity')
+
+        # Hero Banner
+        hero = workspace['hero']
+        self.assertEqual(hero['tag'], 'YOUR CLASSROOM · DESIGN & TECHNOLOGY')
+        self.assertEqual(hero['title'], 'A little feedback goes a long way.')
+        self.assertEqual(hero['subtitle'], 'Review submissions and help every student progress.')
+        self.assertEqual(hero['button_text'], 'Review submissions →')
+
+        # 4 Metric Stat Cards (all '00' in empty state)
+        stats = data['stats']
+        self.assertEqual(stats['students_with_submissions'], 0)
+        self.assertEqual(stats['students_with_submissions_formatted'], '00')
+        self.assertEqual(stats['students_with_submissions_subtext'], 'Student accounts')
+
+        self.assertEqual(stats['submitted_projects'], 0)
+        self.assertEqual(stats['submitted_projects_formatted'], '00')
+        self.assertEqual(stats['submitted_projects_subtext'], 'Across student accounts')
+
+        self.assertEqual(stats['awaiting_review'], 0)
+        self.assertEqual(stats['awaiting_review_formatted'], '00')
+        self.assertEqual(stats['awaiting_review_subtext'], 'Ready for your feedback')
+
+        self.assertEqual(stats['reviewed'], 0)
+        self.assertEqual(stats['reviewed_formatted'], '00')
+        self.assertEqual(stats['reviewed_subtext'], 'Projects with a review status')
+
+        # Check metric_cards array
+        self.assertEqual(len(data['metric_cards']), 4)
+        labels = [c['label'] for c in data['metric_cards']]
+        self.assertEqual(labels, [
+            'Students with submissions',
+            'Submitted projects',
+            'Awaiting review',
+            'Reviewed'
+        ])
+
+        # Submissions to review widget empty state
+        submissions_widget = data['submissions_to_review_widget']
+        self.assertEqual(submissions_widget['title'], 'Submissions to review')
+        self.assertEqual(submissions_widget['subtext'], 'Recent work from your students')
+        self.assertEqual(submissions_widget['empty_message'], 'No student submissions match this filter yet.')
+        self.assertEqual(submissions_widget['count'], 0)
+        self.assertEqual(len(submissions_widget['items']), 0)
+
+        # Student questions widget with Faris's question 'sample 1'
+        questions_widget = data['student_questions_widget']
+        self.assertEqual(questions_widget['title'], 'Student questions')
+        self.assertEqual(questions_widget['subtext'], 'Questions that could use your help')
+        self.assertEqual(questions_widget['link_text'], 'View inbox →')
+        self.assertEqual(questions_widget['link_url'], '/workspace/queries/')
+        self.assertEqual(questions_widget['count'], 1)
+
+        q_item = questions_widget['items'][0]
+        self.assertEqual(q_item['title'], 'sample 1')
+        self.assertEqual(q_item['student_name'], 'faris')
+        self.assertIn('Submitted by faris', q_item['subtext'])
+        self.assertEqual(q_item['indicator_color'], 'teal')
+        self.assertEqual(q_item['action_text'], 'Answer question')
+
+        # Sidebar navigation badges: exactly 0 student projects and 1 open query
+        sidebar_badges = data['sidebar_badges']
+        self.assertEqual(sidebar_badges['student_projects'], 0)
+        self.assertEqual(sidebar_badges['queries'], 1)
+
+    def test_teacher_dashboard_metrics_calculation(self):
+        """
+        Verify precise calculation of the 4 metric cards:
+        - 3 student accounts: faris, student2, student3
+        - faris: project 1 (awaiting review), project 2 (submitted)
+        - student2: project 3 (reviewed / approved)
+        - student3: project 4 (draft, NOT submitted)
+        Calculations:
+        - Students with submissions: 2 (faris & student2)
+        - Submitted projects: 3 (proj 1, 2, 3)
+        - Awaiting review: 2 (proj 1 & 2)
+        - Reviewed: 1 (proj 3)
+        """
+        student2 = User.objects.create_user(
+            email='student2@nodetheory.com',
+            password='Password123!',
+            full_name='Aria',
+            account_type=AccountType.STUDENT
+        )
+        student3 = User.objects.create_user(
+            email='student3@nodetheory.com',
+            password='Password123!',
+            full_name='Leo',
+            account_type=AccountType.STUDENT
+        )
+
+        # Faris: 2 submitted projects
+        Project.objects.create(
+            title='Faris AI Diagnostics',
+            owner=self.student,
+            status=ProjectStatus.AWAITING_REVIEW
+        )
+        Project.objects.create(
+            title='Faris Web App',
+            owner=self.student,
+            status=ProjectStatus.SUBMITTED
+        )
+
+        # Student 2: 1 reviewed / approved project
+        p_approved = Project.objects.create(
+            title='Aria IoT Device',
+            owner=student2,
+            status=ProjectStatus.APPROVED,
+            reviewed_by=self.teacher,
+            reviewed_at=timezone.now(),
+            feedback='Outstanding engineering work.'
+        )
+
+        # Student 3: 1 draft project (not submitted)
+        Project.objects.create(
+            title='Leo Unsubmitted Concept',
+            owner=student3,
+            status=ProjectStatus.DRAFT
+        )
+
+        response = self.client.get('/api/workspace/teacher-dashboard/', **self.auth)
+        self.assertEqual(response.status_code, 200)
+        stats = response.json()['stats']
+
+        # Verify exact counts
+        self.assertEqual(stats['students_with_submissions'], 2)
+        self.assertEqual(stats['students_with_submissions_formatted'], '02')
+
+        self.assertEqual(stats['submitted_projects'], 3)
+        self.assertEqual(stats['submitted_projects_formatted'], '03')
+
+        self.assertEqual(stats['awaiting_review'], 2)
+        self.assertEqual(stats['awaiting_review_formatted'], '02')
+
+        self.assertEqual(stats['reviewed'], 1)
+        self.assertEqual(stats['reviewed_formatted'], '01')
+
+    def test_submissions_to_review_filters(self):
+        """
+        Verify 'Submissions to review' widget filters:
+        - submission_filter=all: returns all submitted projects
+        - submission_filter=awaiting_review: returns only awaiting review projects
+        - submission_filter=reviewed: returns reviewed projects
+        """
+        p1 = Project.objects.create(
+            title='Pending Project',
+            owner=self.student,
+            status=ProjectStatus.AWAITING_REVIEW
+        )
+        p2 = Project.objects.create(
+            title='Approved Project',
+            owner=self.student,
+            status=ProjectStatus.APPROVED,
+            reviewed_by=self.teacher
+        )
+
+        # Filter all
+        res_all = self.client.get('/api/workspace/teacher-dashboard/?submission_filter=all', **self.auth)
+        self.assertEqual(res_all.status_code, 200)
+        widget_all = res_all.json()['submissions_to_review_widget']
+        self.assertEqual(widget_all['count'], 2)
+
+        # Filter awaiting_review
+        res_awaiting = self.client.get('/api/workspace/teacher-dashboard/?submission_filter=awaiting_review', **self.auth)
+        self.assertEqual(res_awaiting.status_code, 200)
+        widget_awaiting = res_awaiting.json()['submissions_to_review_widget']
+        self.assertEqual(widget_awaiting['count'], 1)
+        self.assertEqual(widget_awaiting['items'][0]['title'], 'Pending Project')
+
+        # Filter reviewed
+        res_reviewed = self.client.get('/api/workspace/teacher-dashboard/?submission_filter=reviewed', **self.auth)
+        self.assertEqual(res_reviewed.status_code, 200)
+        widget_reviewed = res_reviewed.json()['submissions_to_review_widget']
+        self.assertEqual(widget_reviewed['count'], 1)
+        self.assertEqual(widget_reviewed['items'][0]['title'], 'Approved Project')
+
+    def test_student_questions_edit_answer_action(self):
+        """
+        Verify that answered questions show 'Edit answer' action:
+        - When answered, is_answered is True and action_text is 'Edit answer'.
+        - When unanswered, is_answered is False and action_text is 'Answer question'.
+        """
+        # Answered query
+        q_answered = Query.objects.create(
+            title='sample 1',
+            description='Question about datasets',
+            asked_by=self.student,
+            status=QueryStatus.ANSWERED,
+            response='You can use dataset H1 from the topics page.',
+            responded_by=self.teacher,
+            responded_at=timezone.now()
+        )
+
+        response = self.client.get('/api/workspace/teacher-dashboard/', **self.auth)
+        self.assertEqual(response.status_code, 200)
+        items = response.json()['student_questions_widget']['items']
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['title'], 'sample 1')
+        self.assertTrue(items[0]['is_answered'])
+        self.assertEqual(items[0]['action_text'], 'Edit answer')
+        self.assertEqual(items[0]['indicator_color'], 'grey')
+
+    def test_teacher_activity_endpoint(self):
+        """
+        Verify Teacher Activity feed endpoint (/api/workspace/teacher/activity/):
+        - Aggregates submissions, reviews, student questions, and teacher replies.
+        - Returns formatted activity entries with icons and timestamps.
+        """
+        # Create a submission
+        proj = Project.objects.create(
+            title='Computer Vision Project',
+            owner=self.student,
+            status=ProjectStatus.SUBMITTED
+        )
+
+        # Create a question & reply
+        query = Query.objects.create(
+            title='Framework question',
+            description='Which model should we use?',
+            asked_by=self.student,
+            status=QueryStatus.ANSWERED,
+            response='PyTorch with ResNet50.',
+            responded_by=self.teacher,
+            responded_at=timezone.now()
+        )
+
+        res = self.client.get('/api/workspace/teacher/activity/', **self.auth)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data['success'])
+        self.assertGreaterEqual(data['total_activities'], 2)
+        activity_types = [a['type'] for a in data['activities']]
+        self.assertIn('submission', activity_types)
+        self.assertIn('query', activity_types)
+        self.assertIn('reply', activity_types)
+
+
+class TeacherStudentProjectsBackendTests(TestCase):
+    """
+    Comprehensive tests for the Teacher 'Student projects' screen (Screenshot: media_1795195613043_d9d98119.png):
+    - TEACHER WORKSPACE header: 'Select a project name to view student details, files, and submission information.'
+    - Card: 'Student projects' ('0 projects across student accounts')
+    - Search Bar: 'Search projects or students' (filters by title, desc, student name, email, team name, topic)
+    - Filter Dropdown: 'All projects ∨' ('All projects', 'Awaiting review', 'Reviewed', 'Approved', 'Needs changes')
+    - Empty state: 'No student submissions match this filter yet.'
+    - Student project upload options: student details, team, topic, files, submission info, review actions.
+    - Review submission action (Approve, Request changes, Add feedback) with student notifications.
+    """
+
+    def setUp(self):
+        self.teacher = User.objects.create_user(
+            email='gopal@nodetheory.com',
+            password='TeacherPassword123!',
+            full_name='gopal',
+            account_type=AccountType.TEACHER,
+            department='DESIGN & TECHNOLOGY'
+        )
+        self.teacher_token = AuthToken.create_for_user(self.teacher)
+        self.auth = {'HTTP_AUTHORIZATION': f'Bearer {self.teacher_token.key}'}
+
+        self.student = User.objects.create_user(
+            email='faris@nodetheory.com',
+            password='FarisPassword123!',
+            full_name='faris',
+            account_type=AccountType.STUDENT,
+            department='DESIGN & TECHNOLOGY'
+        )
+
+    def test_teacher_student_projects_empty_state_matches_screenshot(self):
+        """
+        Verify the empty state matches screenshot media_1795195613043_d9d98119.png:
+        - Breadcrumb: 'Workspace / My projects'
+        - Tag / Title: 'TEACHER WORKSPACE'
+        - Subtitle: 'Select a project name to view student details, files, and submission information.'
+        - Card: 'Student projects', subtext '0 projects across student accounts'
+        - Search bar: placeholder 'Search projects or students'
+        - Filter: 'all', options: All projects, Awaiting review, Reviewed, Approved, Needs changes
+        - Empty message: 'No student submissions match this filter yet.'
+        """
+        res = self.client.get('/api/workspace/student-projects/', **self.auth)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data['success'])
+
+        page_info = data['page_info']
+        self.assertEqual(page_info['tag'], 'TEACHER WORKSPACE')
+        self.assertEqual(page_info['title'], 'TEACHER WORKSPACE')
+        self.assertEqual(page_info['subtitle'], 'Select a project name to view student details, files, and submission information.')
+        self.assertEqual(page_info['breadcrumb'], 'Workspace / My projects')
+
+        card = data['student_projects']
+        self.assertEqual(card['title'], 'Student projects')
+        self.assertEqual(card['subtext'], '0 projects across student accounts')
+        self.assertEqual(card['count'], 0)
+        self.assertEqual(card['search_placeholder'], 'Search projects or students')
+        self.assertEqual(card['empty_message'], 'No student submissions match this filter yet.')
+        self.assertEqual(card['items'], [])
+
+        # Filter options
+        filter_labels = [opt['label'] for opt in card['filter_options']]
+        self.assertIn('All projects', filter_labels)
+        self.assertIn('Awaiting review', filter_labels)
+        self.assertIn('Reviewed', filter_labels)
+        self.assertIn('Approved', filter_labels)
+        self.assertIn('Needs changes', filter_labels)
+
+        # Check sidebar badge
+        self.assertEqual(data['sidebar_badges']['student_projects'], 0)
+
+    def test_student_uploads_project_and_teacher_views_options(self):
+        """
+        Verify that after student uploads project with files and links:
+        - Appears in Teacher 'Student projects' list
+        - Displays student details (name, email, avatar initial, contact link)
+        - Displays uploaded files list with download URL and formatted size
+        - Displays submission info (github repo, live url, submission timestamp)
+        - Displays review options (approve, request changes, give feedback)
+        """
+        # Create student project
+        project = Project.objects.create(
+            title='AI-Based Brain Aneurysm Triage',
+            description='Automated detection on CT and MR Angiography',
+            owner=self.student,
+            status=ProjectStatus.AWAITING_REVIEW,
+            progress=50,
+            github_url='https://github.com/faris/aneurysm-triage',
+            live_url='https://aneurysm-triage.dev'
+        )
+
+        # Student uploads a project file
+        uploaded_file = SimpleUploadedFile(
+            'project_report.pdf',
+            b'%PDF-1.4 project documentation and architecture...',
+            content_type='application/pdf'
+        )
+        ProjectFile.objects.create(
+            project=project,
+            file=uploaded_file,
+            filename='project_report.pdf',
+            file_size=len(uploaded_file),
+            file_type='application/pdf',
+            uploaded_by=self.student
+        )
+
+        # Teacher accesses student projects page
+        res = self.client.get('/api/workspace/student-projects/', **self.auth)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        card = data['student_projects']
+        self.assertEqual(card['count'], 1)
+        self.assertEqual(card['subtext'], '1 projects across student accounts')
+
+        item = card['items'][0]
+        self.assertEqual(item['title'], 'AI-Based Brain Aneurysm Triage')
+        self.assertEqual(item['student']['full_name'], 'faris')
+        self.assertEqual(item['student']['email'], 'faris@nodetheory.com')
+        self.assertEqual(item['student']['avatar_initial'], 'F')
+        self.assertIn('/workspace/chat/faris@nodetheory.com/', item['student']['chat_url'])
+
+        # Files verification
+        self.assertEqual(item['files_count'], 1)
+        self.assertEqual(item['files'][0]['filename'], 'project_report.pdf')
+
+        # Submission info & links
+        self.assertEqual(item['submission_info']['github_url'], 'https://github.com/faris/aneurysm-triage')
+        self.assertEqual(item['submission_info']['live_url'], 'https://aneurysm-triage.dev')
+
+        # Review options
+        self.assertTrue(item['options']['can_review'])
+        self.assertTrue(item['options']['can_approve'])
+        self.assertTrue(item['options']['can_request_changes'])
+        self.assertIn(f"/api/projects/{project.id}/review/", item['options']['review_url'])
+
+    def test_teacher_student_projects_search_bar(self):
+        """
+        Verify search functionality across project titles, student names, and emails.
+        """
+        student2 = User.objects.create_user(
+            email='maya@nodetheory.com',
+            password='MayaPassword123!',
+            full_name='Maya Lin',
+            account_type=AccountType.STUDENT
+        )
+
+        Project.objects.create(
+            title='Autonomous Drone Navigation',
+            owner=self.student,
+            status=ProjectStatus.SUBMITTED
+        )
+        Project.objects.create(
+            title='Smart Bed Sore Prevention Mat',
+            owner=student2,
+            status=ProjectStatus.IN_PROGRESS
+        )
+
+        # Search by student name
+        res_maya = self.client.get('/api/workspace/student-projects/?search=Maya', **self.auth)
+        self.assertEqual(res_maya.status_code, 200)
+        self.assertEqual(res_maya.json()['student_projects']['count'], 1)
+        self.assertEqual(res_maya.json()['student_projects']['items'][0]['title'], 'Smart Bed Sore Prevention Mat')
+
+        # Search by project title
+        res_drone = self.client.get('/api/workspace/student-projects/?search=Drone', **self.auth)
+        self.assertEqual(res_drone.status_code, 200)
+        self.assertEqual(res_drone.json()['student_projects']['count'], 1)
+        self.assertEqual(res_drone.json()['student_projects']['items'][0]['title'], 'Autonomous Drone Navigation')
+
+        # Search with no match
+        res_none = self.client.get('/api/workspace/student-projects/?search=QuantumSatellite', **self.auth)
+        self.assertEqual(res_none.status_code, 200)
+        self.assertEqual(res_none.json()['student_projects']['count'], 0)
+        self.assertEqual(res_none.json()['student_projects']['empty_message'], 'No student submissions match this filter yet.')
+
+    def test_teacher_student_projects_filter_dropdown(self):
+        """
+        Verify filtering by status:
+        - filter=awaiting_review
+        - filter=approved
+        - filter=needs_changes
+        """
+        p_awaiting = Project.objects.create(
+            title='Pending Project',
+            owner=self.student,
+            status=ProjectStatus.AWAITING_REVIEW
+        )
+        p_approved = Project.objects.create(
+            title='Approved Project',
+            owner=self.student,
+            status=ProjectStatus.APPROVED,
+            reviewed_by=self.teacher
+        )
+        p_changes = Project.objects.create(
+            title='Changes Requested Project',
+            owner=self.student,
+            status=ProjectStatus.REJECTED,
+            reviewed_by=self.teacher,
+            feedback='Needs more experimental data'
+        )
+
+        # Filter awaiting_review
+        res1 = self.client.get('/api/workspace/student-projects/?filter=awaiting_review', **self.auth)
+        self.assertEqual(res1.status_code, 200)
+        items1 = res1.json()['student_projects']['items']
+        self.assertEqual(len(items1), 1)
+        self.assertEqual(items1[0]['title'], 'Pending Project')
+
+        # Filter approved
+        res2 = self.client.get('/api/workspace/student-projects/?filter=approved', **self.auth)
+        self.assertEqual(res2.status_code, 200)
+        items2 = res2.json()['student_projects']['items']
+        self.assertEqual(len(items2), 1)
+        self.assertEqual(items2[0]['title'], 'Approved Project')
+
+        # Filter needs_changes
+        res3 = self.client.get('/api/workspace/student-projects/?filter=needs_changes', **self.auth)
+        self.assertEqual(res3.status_code, 200)
+        items3 = res3.json()['student_projects']['items']
+        self.assertEqual(len(items3), 1)
+        self.assertEqual(items3[0]['title'], 'Changes Requested Project')
+
+    def test_teacher_student_project_detail_view(self):
+        """
+        Verify selecting a single project returns student details, files, submission info, and options.
+        GET /api/workspace/student-projects/<id>/
+        """
+        project = Project.objects.create(
+            title='Speech-Therapy Coach in Tamil',
+            description='Speech AI model trained for vernacular therapy.',
+            owner=self.student,
+            status=ProjectStatus.AWAITING_REVIEW,
+            github_url='https://github.com/faris/tamil-speech-coach'
+        )
+
+        res = self.client.get(f'/api/workspace/student-projects/{project.id}/', **self.auth)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['project']['title'], 'Speech-Therapy Coach in Tamil')
+        self.assertEqual(data['student']['full_name'], 'faris')
+        self.assertEqual(data['submission_info']['github_url'], 'https://github.com/faris/tamil-speech-coach')
+        self.assertTrue(data['options']['can_review'])
+
+    def test_teacher_review_actions_and_student_notifications(self):
+        """
+        Verify teacher reviewing a submission:
+        - Approve sets status to approved and dispatches 'Project Approved! 🎉' notification.
+        - Request changes sets status to rejected and dispatches 'Changes Requested on Project'.
+        """
+        project = Project.objects.create(
+            title='Oral Cancer Screening AI',
+            owner=self.student,
+            status=ProjectStatus.AWAITING_REVIEW
+        )
+
+        # Teacher requests changes
+        review_payload = {
+            'status': 'needs_changes',
+            'feedback': 'Please add validation on test pathology dataset.'
+        }
+        review_res = self.client.post(
+            f'/api/teacher/student-projects/{project.id}/review/',
+            data=review_payload,
+            **self.auth
+        )
+        self.assertEqual(review_res.status_code, 200)
+        project.refresh_from_db()
+        self.assertEqual(project.status, ProjectStatus.REJECTED)
+        self.assertEqual(project.feedback, 'Please add validation on test pathology dataset.')
+
+        # Verify notification created for student
+        notif = Notification.objects.filter(recipient=self.student).first()
+        self.assertIsNotNone(notif)
+        self.assertEqual(notif.title, 'Changes Requested on Project')
+        self.assertEqual(notif.tag, 'Node Theory')
+
+        # Teacher subsequently approves project
+        approve_res = self.client.post(
+            f'/api/teacher/student-projects/{project.id}/review/',
+            data={'status': 'approved', 'feedback': 'Pathology dataset validation confirmed. Great job!'},
+            **self.auth
+        )
+        self.assertEqual(approve_res.status_code, 200)
+        project.refresh_from_db()
+        self.assertEqual(project.status, ProjectStatus.APPROVED)
+        self.assertEqual(project.progress, 100)
+
+        # Verify approval notification created for student
+        latest_notif = Notification.objects.filter(recipient=self.student).order_by('-created_at').first()
+        self.assertEqual(latest_notif.title, 'Project Approved! 🎉')
+
+
+class DataTopicsBackendTests(TestCase):
+    """
+    Test suite for Teacher Dashboard Section 3: Workspace / Data (Screenshot: media_1795197028583_babd1550.png).
+    Verifies:
+      - Workspace / Data page structure, tag 'DATA', title 'Topics', subtitle
+      - Table metadata, columns (Case, Title, Domain, Level, Team ID, Guide, Status)
+      - Default 11 healthcare topics (H1 through H11)
+      - Upload file dataset handling (CSV, JSON, replace mode vs append mode)
+      - Assigning guide to topics
+      - Exporting dataset as CSV and JSON
+      - Topic detail view, update, and delete
+      - Sidebar navigation badges (Student projects, Queries, Data active)
+    """
+    def setUp(self):
+        self.client = Client()
+        self.teacher = User.objects.create_user(
+            email='gopal@nodetheory.edu',
+            password='Password123!',
+            full_name='gopal',
+            department='Design & Technology',
+            account_type=AccountType.TEACHER
+        )
+        self.token = AuthToken.objects.create(user=self.teacher, key='teacher-data-test-token')
+        self.auth = {'HTTP_AUTHORIZATION': f'Bearer {self.token.key}'}
+
+    def test_workspace_data_initial_screen_and_default_topics(self):
+        """
+        Verify Workspace / Data matches media_1795197028583_babd1550.png:
+        - Breadcrumb: Workspace / Data
+        - Tag: DATA
+        - Title: Topics
+        - Subtitle: Upload a file to replace or add your dataset, or review the sample AI use-case topics below.
+        - Upload file action descriptor
+        - Table: title 'Topics', subtext 'AI project case topics and their classifications.'
+        - Columns: Case, Title, Domain, Level, Team ID, Guide, Status
+        - 11 seed topics H1 to H11
+        - Sidebar navigation: Data active, Student projects badge, Queries badge
+        """
+        response = self.client.get('/api/workspace/data/', **self.auth)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['success'])
+
+        # Header context
+        header = data['header']
+        self.assertEqual(header['tag'], 'DATA')
+        self.assertEqual(header['title'], 'Topics')
+        self.assertIn('Upload a file to replace or add your dataset', header['subtitle'])
+        self.assertEqual(data['breadcrumb'], 'Workspace / Data')
+
+        # Upload action
+        upload_action = data['upload_action']
+        self.assertEqual(upload_action['button_text'], 'Upload file')
+        self.assertEqual(upload_action['method'], 'POST')
+
+        # Table structure & 7 columns
+        table = data['table']
+        self.assertEqual(table['title'], 'Topics')
+        self.assertEqual(table['subtext'], 'AI project case topics and their classifications.')
+        column_keys = [c['key'] for c in table['columns']]
+        self.assertEqual(column_keys, ['case', 'title', 'domain', 'level', 'team_id', 'guide', 'status'])
+        column_labels = [c['label'] for c in table['columns']]
+        self.assertEqual(column_labels, ['Case', 'Title', 'Domain', 'Level', 'Team ID', 'Guide', 'Status'])
+
+        # Default 11 topics
+        self.assertEqual(table['count'], 11)
+        self.assertEqual(len(data['topics']), 11)
+        first_row = data['topics'][0]
+        self.assertEqual(first_row['case'], 'H1')
+        self.assertEqual(first_row['title'], 'AI-Based Brain Aneurysm Triage on CT and MR Angiography')
+        self.assertEqual(first_row['domain'], 'Healthcare')
+        self.assertEqual(first_row['level'], 'High')
+        self.assertEqual(first_row['status'], 'Available')
+
+        last_row = data['topics'][10]
+        self.assertEqual(last_row['case'], 'H11')
+        self.assertEqual(last_row['title'], 'Pasu: AI Speech-Therapy Coach in Tamil')
+        self.assertEqual(last_row['domain'], 'Healthcare')
+        self.assertEqual(last_row['level'], 'High')
+
+        # Sidebar navigation check
+        nav_items = {item['name']: item for item in data['sidebar_navigation']}
+        self.assertTrue(nav_items['Data']['active'])
+        self.assertFalse(nav_items['Student projects']['active'])
+        self.assertFalse(nav_items['Dashboard']['active'])
+
+    def test_upload_file_csv_append_mode(self):
+        """
+        Verify 'Upload file' button accepting CSV to add or update topics.
+        """
+        csv_content = (
+            "Case,Title,Domain,Level,Guide\n"
+            "R1,Autonomous Rover Navigation via LiDAR,Robotics,High,Dr. Alan Turing\n"
+            "R2,Drone Crop-Health Surveillance,Agriculture,Moderate,Prof. Norman Borlaug\n"
+        )
+        csv_file = SimpleUploadedFile("new_robotics_topics.csv", csv_content.encode('utf-8'), content_type="text/csv")
+
+        response = self.client.post(
+            '/api/data/upload/',
+            {'file': csv_file},
+            **self.auth
+        )
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['created_count'], 2)
+        self.assertFalse(data['replace_mode'])
+
+        # Verify new topics in DB
+        r1 = Topic.objects.filter(case_code='R1').first()
+        self.assertIsNotNone(r1)
+        self.assertEqual(r1.title, 'Autonomous Rover Navigation via LiDAR')
+        self.assertEqual(r1.domain, 'Robotics')
+        self.assertEqual(r1.guide, 'Dr. Alan Turing')
+
+    def test_upload_file_json_format(self):
+        """
+        Verify 'Upload file' accepts JSON dataset files.
+        """
+        topics_json = {
+            "topics": [
+                {
+                    "case": "E1",
+                    "title": "Smart Grid Energy Load Prediction",
+                    "domain": "Energy",
+                    "level": "High",
+                    "guide": "Dr. Nikola Tesla"
+                }
+            ]
+        }
+        json_file = SimpleUploadedFile(
+            "energy_topics.json",
+            json.dumps(topics_json).encode('utf-8'),
+            content_type="application/json"
+        )
+
+        response = self.client.post(
+            '/api/topics/upload/',
+            {'file': json_file},
+            **self.auth
+        )
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['created_count'], 1)
+
+        e1 = Topic.objects.filter(case_code='E1').first()
+        self.assertIsNotNone(e1)
+        self.assertEqual(e1.domain, 'Energy')
+
+    def test_upload_file_replace_mode(self):
+        """
+        Verify replace=true deletes unassigned available topics and installs the uploaded set.
+        """
+        Topic.seed_defaults()
+        self.assertEqual(Topic.objects.count(), 11)
+
+        csv_content = (
+            "Case,Title,Domain,Level\n"
+            "AI1,Quantum Machine Learning for Drug Discovery,Quantum AI,High\n"
+        )
+        csv_file = SimpleUploadedFile("quantum_topics.csv", csv_content.encode('utf-8'), content_type="text/csv")
+
+        response = self.client.post(
+            '/api/topics/upload/?replace=true',
+            {'file': csv_file},
+            **self.auth
+        )
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertTrue(data['success'])
+        self.assertTrue(data['replace_mode'])
+        self.assertEqual(data['total_topics'], 1)
+        self.assertEqual(Topic.objects.count(), 1)
+        self.assertEqual(Topic.objects.first().case_code, 'AI1')
+
+    def test_assign_faculty_guide_to_topic(self):
+        """
+        Verify assigning a guide to a topic via POST /api/topics/<case>/assign-guide/.
+        """
+        Topic.seed_defaults()
+        response = self.client.post(
+            '/api/topics/H1/assign-guide/',
+            data=json.dumps({'guide': 'Dr. Gopal (Lead AI Faculty)'}),
+            content_type='application/json',
+            **self.auth
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['topic']['guide'], 'Dr. Gopal (Lead AI Faculty)')
+
+        h1 = Topic.objects.get(case_code='H1')
+        self.assertEqual(h1.guide, 'Dr. Gopal (Lead AI Faculty)')
+
+    def test_topic_detail_and_update(self):
+        """
+        Verify fetching topic detail and editing properties (title, domain, level).
+        """
+        Topic.seed_defaults()
+
+        # GET detail
+        res = self.client.get('/api/topics/H2/', **self.auth)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['topic']['case'], 'H2')
+
+        # PATCH update
+        patch_res = self.client.patch(
+            '/api/topics/H2/',
+            data=json.dumps({'level': 'High', 'guide': 'Prof. Raman'}),
+            content_type='application/json',
+            **self.auth
+        )
+        self.assertEqual(patch_res.status_code, 200)
+        h2 = Topic.objects.get(case_code='H2')
+        self.assertEqual(h2.level, 'High')
+        self.assertEqual(h2.guide, 'Prof. Raman')
+
+    def test_export_topics_as_csv_and_json(self):
+        """
+        Verify exporting dataset as CSV and JSON.
+        """
+        Topic.seed_defaults()
+
+        # CSV Export
+        csv_res = self.client.get('/api/workspace/data/export/?format=csv', **self.auth)
+        self.assertEqual(csv_res.status_code, 200)
+        self.assertEqual(csv_res['Content-Type'], 'text/csv; charset=utf-8')
+        self.assertIn('attachment; filename="topics_dataset.csv"', csv_res['Content-Disposition'])
+        content = csv_res.content.decode('utf-8')
+        self.assertIn('Case,Title,Domain,Level,Team ID,Guide,Status', content)
+        self.assertIn('H1,AI-Based Brain Aneurysm Triage on CT and MR Angiography,Healthcare,High', content)
+
+        # JSON Export
+        json_res = self.client.get('/api/workspace/data/export/?format=json', **self.auth)
+        self.assertEqual(json_res.status_code, 200)
+        json_data = json_res.json()
+        self.assertTrue(json_data['success'])
+        self.assertEqual(json_data['total'], 11)
+        self.assertEqual(json_data['topics'][0]['case'], 'H1')
+
+    def test_topic_deletion(self):
+        """
+        Verify deleting a topic via DELETE /api/topics/<case>/.
+        """
+        topic = Topic.objects.create(
+            case_code='TEMP99',
+            title='Temporary Test Topic',
+            domain='Testing',
+            level='Low'
+        )
+        del_res = self.client.delete(f'/api/topics/{topic.case_code}/', **self.auth)
+        self.assertEqual(del_res.status_code, 200)
+        self.assertFalse(Topic.objects.filter(case_code='TEMP99').exists())
+
+
+class TeacherStudentTeamsProjectsBackendTests(TestCase):
+    """
+    Test suite for Teacher Dashboard Section 4:
+    'Workspace / Student teams & projects' (Screenshot: media_1795197971460_4d3418f5.png).
+    Verifies:
+      - Header context: 'TEACHER WORKSPACE', 'Student teams & projects', subtitle
+      - Sidebar navigation: 'Student teams & projects' active, badges
+      - Team card before submission:
+          * Team name: 'xander'
+          * Subtext: 'Created by faris · 1 members · 0 projects'
+          * Submission text: 'This team has not submitted a project yet.'
+          * Member account list (name, email/account, department, role, avatar)
+      - Teacher sending submission reminder notification to team
+      - Team card after submission (the new options shown):
+          * Submission time details (formatted date/time, relative time)
+          * Team members and accounts
+          * Project details, files, repository URL
+          * New teacher actions: Open project, Review submission, Grade & Feedback, Download files
+      - Teacher reviewing team project via team endpoint with grade & feedback
+      - Filtering by submission status (submitted, not_submitted) and search
+    """
+    def setUp(self):
+        self.client = Client()
+        # Teacher account
+        self.teacher = User.objects.create_user(
+            email='gopal@nodetheory.edu',
+            password='Password123!',
+            full_name='gopal',
+            department='Design & Technology',
+            account_type=AccountType.TEACHER
+        )
+        self.teacher_token = AuthToken.objects.create(user=self.teacher, key='teacher-teams-token-4')
+        self.teacher_auth = {'HTTP_AUTHORIZATION': f'Bearer {self.teacher_token.key}'}
+
+        # Student account matching screenshot: faris
+        self.student = User.objects.create_user(
+            email='faris@gmail.com',
+            password='Password123!',
+            full_name='faris',
+            department='Computer Science',
+            account_type=AccountType.STUDENT
+        )
+        self.student_token = AuthToken.objects.create(user=self.student, key='student-faris-token-4')
+        self.student_auth = {'HTTP_AUTHORIZATION': f'Bearer {self.student_token.key}'}
+
+        # Student creates team 'xander' matching screenshot
+        self.team = Team.objects.create(
+            name='xander',
+            description='Computer vision and speech team',
+            created_by=self.student,
+            leader=self.student,
+            department='Computer Science'
+        )
+        TeamMember.objects.create(
+            team=self.team,
+            user=self.student,
+            role='Leader'
+        )
+
+    def test_unsubmitted_team_screen_matches_screenshot(self):
+        """
+        Verify 'Workspace / Student teams & projects' in unsubmitted state matching media_1795197971460_4d3418f5.png:
+        - Breadcrumb: Workspace / Student teams & projects
+        - Header: TEACHER WORKSPACE / Student teams & projects / Open a project to see its submission time...
+        - Card:
+          * Team name: xander
+          * Subtext: Created by faris · 1 members · 0 projects
+          * Message: This team has not submitted a project yet.
+          * Member: faris, faris@gmail.com, Leader
+        """
+        response = self.client.get('/api/workspace/teams/', **self.teacher_auth)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['success'])
+
+        # Header context
+        header = data['header']
+        self.assertEqual(header['tag'], 'TEACHER WORKSPACE')
+        self.assertEqual(header['title'], 'Student teams & projects')
+        self.assertIn('Open a project to see its submission time', header['subtitle'])
+        self.assertEqual(data['breadcrumb'], 'Workspace / Student teams & projects')
+
+        # Sidebar navigation check
+        nav_items = {item['name']: item for item in data['sidebar_navigation']}
+        self.assertTrue(nav_items['Student teams & projects']['active'])
+        self.assertFalse(nav_items['Data']['active'])
+
+        # Team cards list
+        self.assertEqual(data['count'], 1)
+        card = data['teams'][0]
+        self.assertEqual(card['name'], 'xander')
+        self.assertEqual(card['subtext'], 'Created by faris · 1 members · 0 projects')
+        self.assertFalse(card['has_submitted_project'])
+        self.assertEqual(card['submission_status'], 'not_submitted')
+        self.assertEqual(card['empty_message'], 'This team has not submitted a project yet.')
+        self.assertIsNone(card['project'])
+
+        # Verify members and account list: "each team member's name and account"
+        self.assertEqual(len(card['members']), 1)
+        member = card['members'][0]
+        self.assertEqual(member['full_name'], 'faris')
+        self.assertEqual(member['email'], 'faris@gmail.com')
+        self.assertEqual(member['account_id'], 'faris@gmail.com')
+        self.assertEqual(member['role'], 'Leader')
+        self.assertTrue(member['is_leader'])
+
+        # Options for unsubmitted team
+        options = card['options']
+        self.assertFalse(options['can_open_project'])
+        self.assertFalse(options['can_review'])
+        self.assertEqual(options['status_pill']['label'], 'Not submitted')
+        self.assertIn('send_reminder', options['actions'])
+
+    def test_teacher_send_submission_reminder_to_team(self):
+        """
+        Verify teacher sending a submission reminder notification to all members of an unsubmitted team.
+        """
+        url = f"/api/teacher/student-teams/{self.team.id}/remind/"
+        res = self.client.post(url, data={}, **self.teacher_auth)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['notified_count'], 1)
+
+        # Check notification received by faris
+        notif = Notification.objects.filter(recipient=self.student).first()
+        self.assertIsNotNone(notif)
+        self.assertEqual(notif.title, 'Project Submission Reminder ⏰')
+        self.assertIn("is reminding your team 'xander' to submit your project", notif.message)
+        self.assertEqual(notif.tag, 'Node Theory')
+
+    def test_submitted_team_screen_shows_new_options_and_submission_details(self):
+        """
+        Verify that after the team submits a project, the card shows:
+        - Updated subtext: 'Created by faris · 1 members · 1 projects'
+        - Submission time details (formatted date/time and relative time)
+        - Each team member's name and account
+        - Project info, topic H11, attached files, GitHub URL
+        - New options available: can_open_project, can_review, can_grade, can_view_files
+        - Status badge: 'Awaiting review'
+        """
+        Topic.seed_defaults()
+        h11 = Topic.objects.get(case_code='H11')
+
+        # Student submits project for team
+        project_file = SimpleUploadedFile("tamil_speech_model.zip", b"fake zip contents", content_type="application/zip")
+        upload_res = self.client.post(
+            f"/api/teams/{self.team.id}/upload-project/",
+            {
+                'title': 'Pasu: AI Speech-Therapy Coach in Tamil',
+                'description': 'Mobile speech therapy tool for Tamil phoneme articulation.',
+                'topic': h11.case_code,
+                'file': project_file,
+                'github_url': 'https://github.com/faris/tamil-speech-therapy',
+                'submit': 'true'
+            },
+            **self.student_auth
+        )
+        self.assertEqual(upload_res.status_code, 201)
+
+        # Teacher accesses Workspace / Student teams & projects
+        res = self.client.get('/api/workspace/teams/', **self.teacher_auth)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data['success'])
+
+        card = data['teams'][0]
+        self.assertEqual(card['name'], 'xander')
+        self.assertEqual(card['subtext'], 'Created by faris · 1 members · 1 projects')
+        self.assertTrue(card['has_submitted_project'])
+        self.assertEqual(card['submission_status'], ProjectStatus.AWAITING_REVIEW)
+        self.assertIsNone(card['empty_message'])
+
+        # Submission time details
+        project_data = card['project']
+        self.assertIsNotNone(project_data)
+        self.assertEqual(project_data['title'], 'Pasu: AI Speech-Therapy Coach in Tamil')
+        self.assertEqual(project_data['topic']['case'], 'H11')
+        self.assertIn('submission_time', project_data)
+        self.assertIsNotNone(project_data['submission_time']['submitted_at'])
+        self.assertIn('formatted_submission_time', project_data['submission_time'])
+        self.assertIn('relative_submission_time', project_data['submission_time'])
+        self.assertEqual(project_data['github_url'], 'https://github.com/faris/tamil-speech-therapy')
+        self.assertEqual(project_data['files_count'], 1)
+
+        # Team member account details
+        self.assertEqual(len(card['members']), 1)
+        self.assertEqual(card['members'][0]['full_name'], 'faris')
+        self.assertEqual(card['members'][0]['account_id'], 'faris@gmail.com')
+
+        # The new options shown after project is submitted
+        options = card['options']
+        self.assertTrue(options['has_submission'])
+        self.assertTrue(options['can_open_project'])
+        self.assertTrue(options['can_review'])
+        self.assertTrue(options['can_grade'])
+        self.assertTrue(options['can_view_files'])
+        self.assertEqual(options['status_pill']['label'], 'Awaiting review')
+        self.assertEqual(options['status_pill']['variant'], 'warning')
+        self.assertIn('open_project', options['actions'])
+        self.assertIn('review_submission', options['actions'])
+        self.assertIn('download_files', options['actions'])
+        self.assertIn('grade_submission', options['actions'])
+
+    def test_teacher_review_team_submission_with_grade_and_feedback(self):
+        """
+        Verify teacher reviewing team submission directly via /api/teacher/student-teams/<team_id>/review/:
+        - Sets status to 'approved'
+        - Sets grade to 'A+'
+        - Sets feedback notes
+        - Notifies all team members
+        - Updates status pill to 'Approved'
+        """
+        project = Project.objects.create(
+            title='Seizure and Abnormal-EEG Detection',
+            team=self.team,
+            owner=self.student,
+            status=ProjectStatus.AWAITING_REVIEW
+        )
+
+        review_payload = {
+            'status': 'approved',
+            'grade': 'A+',
+            'feedback': 'Excellent signal processing pipeline and model accuracy!'
+        }
+        review_res = self.client.post(
+            f"/api/teacher/student-teams/{self.team.id}/review/",
+            data=review_payload,
+            **self.teacher_auth
+        )
+        self.assertEqual(review_res.status_code, 200)
+
+        project.refresh_from_db()
+        self.assertEqual(project.status, ProjectStatus.APPROVED)
+        self.assertEqual(project.grade, 'A+')
+        self.assertEqual(project.feedback, 'Excellent signal processing pipeline and model accuracy!')
+        self.assertEqual(project.reviewed_by, self.teacher)
+
+        # Verify notification delivered to team member
+        notif = Notification.objects.filter(recipient=self.student, title__contains='Approved').first()
+        self.assertIsNotNone(notif)
+        self.assertEqual(notif.tag, 'Node Theory')
+
+        # Verify updated status on teams workspace
+        res = self.client.get('/api/workspace/teams/', **self.teacher_auth)
+        self.assertEqual(res.status_code, 200)
+        card = res.json()['teams'][0]
+        self.assertEqual(card['options']['status_pill']['label'], 'Approved')
+        self.assertEqual(card['project']['grade'], 'A+')
+
+    def test_search_and_filter_teams(self):
+        """
+        Verify filtering student teams by submission status and searching by team name.
+        """
+        # Create second team with no submission
+        student2 = User.objects.create_user(
+            email='alice@gmail.com',
+            password='Password123!',
+            full_name='alice',
+            account_type=AccountType.STUDENT
+        )
+        team2 = Team.objects.create(
+            name='biotech-crew',
+            created_by=student2,
+            leader=student2
+        )
+        TeamMember.objects.create(team=team2, user=student2, role='Leader')
+
+        # Team 1 has submitted project
+        Project.objects.create(
+            title='AI Brain Triage',
+            team=self.team,
+            owner=self.student,
+            status=ProjectStatus.AWAITING_REVIEW
+        )
+
+        # Filter: submitted
+        sub_res = self.client.get('/api/workspace/teams/?filter=submitted', **self.teacher_auth)
+        self.assertEqual(sub_res.status_code, 200)
+        self.assertEqual(sub_res.json()['count'], 1)
+        self.assertEqual(sub_res.json()['teams'][0]['name'], 'xander')
+
+        # Filter: not_submitted
+        notsub_res = self.client.get('/api/workspace/teams/?filter=not_submitted', **self.teacher_auth)
+        self.assertEqual(notsub_res.status_code, 200)
+        self.assertEqual(notsub_res.json()['count'], 1)
+        self.assertEqual(notsub_res.json()['teams'][0]['name'], 'biotech-crew')
+
+        # Search: xander
+        search_res = self.client.get('/api/workspace/teams/?search=xander', **self.teacher_auth)
+        self.assertEqual(search_res.status_code, 200)
+        self.assertEqual(search_res.json()['count'], 1)
+        self.assertEqual(search_res.json()['teams'][0]['name'], 'xander')
+
+
+class TeacherQueriesBackendTests(TestCase):
+    """
+    Test suite for Teacher Dashboard Section 5:
+    'Workspace / Queries' (Answer your students) and Teacher Reply Modal (media_1795199174083_d92b2907.png & media_1795199309500_9426057a.png).
+    Verifies:
+      - Teacher view of Workspace / Queries:
+          * Tag: 'STUDENT QUESTIONS'
+          * Title: 'Answer your students'
+          * Subtitle: 'Review questions from your students and share helpful answers.'
+          * Breadcrumb: 'Workspace / Queries'
+          * Card: 'Student questions', '1 question'
+          * Question row: dot green, title 'sample 1', 'Submitted by faris · Nov 20, 2026, 9:11 PM', action 'Edit answer' / 'Answer question'
+      - Teacher reply modal structure (Question details, Question from faris, Question, Details, Your answer, Cancel, Save answer)
+      - Answering student question via POST /api/queries/<id>/reply/
+      - Automatic dispatch of notification to student:
+          * Title: 'Teacher reply'
+          * Message: 'Your teacher answered one of your questions.'
+          * Tag: 'Node Theory'
+          * Notification badge indicator
+      - Student viewing the notification in their notification panel
+      - Teacher editing their answer via PATCH /api/queries/<id>/
+    """
+    def setUp(self):
+        self.client = Client()
+        # Teacher account
+        self.teacher = User.objects.create_user(
+            email='gopal@nodetheory.edu',
+            password='Password123!',
+            full_name='gopal',
+            department='Design & Technology',
+            account_type=AccountType.TEACHER
+        )
+        self.teacher_token = AuthToken.objects.create(user=self.teacher, key='teacher-queries-token-5')
+        self.teacher_auth = {'HTTP_AUTHORIZATION': f'Bearer {self.teacher_token.key}'}
+
+        # Student account matching screenshot: faris
+        self.student = User.objects.create_user(
+            email='faris@gmail.com',
+            password='Password123!',
+            full_name='faris',
+            department='Computer Science',
+            account_type=AccountType.STUDENT
+        )
+        self.student_token = AuthToken.objects.create(user=self.student, key='student-faris-token-5')
+        self.student_auth = {'HTTP_AUTHORIZATION': f'Bearer {self.student_token.key}'}
+
+        # Student asks question matching screenshot: "sample 1" / "sample1"
+        self.query = Query.objects.create(
+            title='sample 1',
+            description='sample1',
+            asked_by=self.student,
+            status=QueryStatus.OPEN
+        )
+
+    def test_teacher_workspace_queries_matches_screenshot(self):
+        """
+        Verify Teacher view of Workspace / Queries matches media_1795199174083_d92b2907.png:
+        - Breadcrumb: Workspace / Queries
+        - Tag: STUDENT QUESTIONS
+        - Title: Answer your students
+        - Subtitle: Review questions from your students and share helpful answers.
+        - Card: Student questions / 1 question
+        - Item: title 'sample 1', details 'sample1', Submitted by faris · <datetime>
+        - Sidebar: Queries active with badge 1
+        """
+        response = self.client.get('/api/workspace/queries/', **self.teacher_auth)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['success'])
+
+        # Header context
+        header = data['header']
+        self.assertEqual(header['tag'], 'STUDENT QUESTIONS')
+        self.assertEqual(header['title'], 'Answer your students')
+        self.assertIn('Review questions from your students and share helpful answers', header['subtitle'])
+        self.assertEqual(data['breadcrumb'], 'Workspace / Queries')
+
+        # Sidebar navigation check
+        nav_items = {item['name']: item for item in data['sidebar_navigation']}
+        self.assertTrue(nav_items['Queries']['active'])
+        self.assertEqual(nav_items['Queries']['badge'], 1)
+        self.assertFalse(nav_items['Dashboard']['active'])
+
+        # Card header & subtext
+        card = data['card']
+        self.assertEqual(card['title'], 'Student questions')
+        self.assertEqual(card['subtext'], '1 question')
+
+        # Query item check
+        self.assertEqual(data['count'], 1)
+        item = data['queries'][0]
+        self.assertEqual(item['title'], 'sample 1')
+        self.assertEqual(item['details'], 'sample1')
+        self.assertEqual(item['indicator_dot'], 'green')
+        self.assertIn('Submitted by faris', item['subtext'])
+        self.assertEqual(item['action_button'], 'Answer question')
+
+        # Modal metadata check for front-end rendering
+        modal = item['modal']
+        self.assertEqual(modal['title'], 'Question details')
+        self.assertEqual(modal['subtitle'], 'Question from faris')
+        self.assertEqual(modal['question'], 'sample 1')
+        self.assertEqual(modal['details'], 'sample1')
+        self.assertEqual(modal['buttons']['cancel'], 'Cancel')
+        self.assertEqual(modal['buttons']['save'], 'Save answer')
+
+    def test_teacher_query_details_modal_endpoint(self):
+        """
+        Verify GET /api/queries/<id>/ returns modal structure matching media_1795199309500_9426057a.png.
+        """
+        res = self.client.get(f"/api/queries/{self.query.id}/", **self.teacher_auth)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data['success'])
+
+        modal = data['modal']
+        self.assertEqual(modal['title'], 'Question details')
+        self.assertEqual(modal['subtitle'], 'Question from faris')
+        self.assertEqual(modal['question'], 'sample 1')
+        self.assertEqual(modal['details'], 'sample1')
+        self.assertEqual(modal['buttons']['save'], 'Save answer')
+        self.assertEqual(modal['buttons']['cancel'], 'Cancel')
+
+    def test_teacher_reply_saves_answer_and_notifies_student(self):
+        """
+        Verify teacher replying to student question:
+        - POST /api/queries/<id>/reply/ with 'answer of sample 1'
+        - Query response is updated to 'answer of sample 1'
+        - Query status is updated to 'answered'
+        - Student receives notification:
+          * Title: 'Teacher reply'
+          * Message: 'Your teacher answered one of your questions.'
+          * Tag: 'Node Theory'
+          * Is Read: False (lights up notification badge indicator!)
+        """
+        reply_payload = {
+            'answer': 'answer of sample 1'
+        }
+        reply_res = self.client.post(
+            f"/api/queries/{self.query.id}/reply/",
+            data=json.dumps(reply_payload),
+            content_type='application/json',
+            **self.teacher_auth
+        )
+        self.assertEqual(reply_res.status_code, 200)
+        data = reply_res.json()
+        self.assertTrue(data['success'])
+
+        # Verify DB state
+        self.query.refresh_from_db()
+        self.assertEqual(self.query.response, 'answer of sample 1')
+        self.assertEqual(self.query.status, QueryStatus.ANSWERED)
+        self.assertEqual(self.query.responded_by, self.teacher)
+        self.assertIsNotNone(self.query.responded_at)
+
+        # Verify notification dispatched to student faris
+        notif = Notification.objects.filter(recipient=self.student).order_by('-created_at').first()
+        self.assertIsNotNone(notif)
+        self.assertIn('Teacher Answered Your Question', notif.title)
+        self.assertIn('sample 1', notif.title)
+        self.assertIn('answer of sample 1', notif.message)
+        self.assertEqual(notif.tag, 'Node Theory')
+        self.assertEqual(notif.notification_type, NotificationType.QUERY_ANSWERED)
+        self.assertFalse(notif.is_read)
+
+        # Verify student's notification box reflects the new reply notification
+        student_notif_res = self.client.get('/api/notifications/', **self.student_auth)
+        self.assertEqual(student_notif_res.status_code, 200)
+        notif_data = student_notif_res.json()
+        self.assertGreaterEqual(notif_data['unread_count'], 1)
+        self.assertIn('Teacher Answered Your Question', notif_data['notifications'][0]['title'])
+        self.assertEqual(notif_data['notifications'][0]['tag'], 'Node Theory')
+
+        # Verify teacher workspace now displays 'Edit answer' button
+        workspace_res = self.client.get('/api/workspace/queries/', **self.teacher_auth)
+        self.assertEqual(workspace_res.status_code, 200)
+        card_item = workspace_res.json()['queries'][0]
+        self.assertEqual(card_item['action_button'], 'Edit answer')
+        self.assertEqual(card_item['answer'], 'answer of sample 1')
+
+    def test_teacher_edit_answer(self):
+        """
+        Verify teacher can edit an existing answer via PATCH /api/queries/<id>/.
+        """
+        self.query.response = 'initial answer'
+        self.query.status = QueryStatus.ANSWERED
+        self.query.save()
+
+        edit_res = self.client.patch(
+            f"/api/queries/{self.query.id}/",
+            data=json.dumps({'your_answer': 'updated comprehensive answer for sample 1'}),
+            content_type='application/json',
+            **self.teacher_auth
+        )
+        self.assertEqual(edit_res.status_code, 200)
+        self.query.refresh_from_db()
+        self.assertEqual(self.query.response, 'updated comprehensive answer for sample 1')
+
+
+class TeacherActivityNotificationsBackendTests(TestCase):
+    """
+    Comprehensive test suite for the Teacher Activity Notification Modal
+    matching screenshot media_1795200389663_d4e22e88.png:
+    - Modal Header:
+      - Title: 'Teacher activity'
+      - Subtitle: 'Updates from your project workspace.'
+      - Close icon '✕'
+    - Notification Cards:
+      1. 'Review queue' - '3 student submissions are awaiting your feedback.' (Today)
+      2. 'Question received' - 'A student asked for clarification on project scope.' (Today)
+      3. 'Progress update' - 'The class is moving ahead on schedule.' (Yesterday)
+    - Modal Footer buttons: 'Cancel' and 'Close' (cyan)
+    - Dedicated teacher activity endpoints:
+      - GET  /api/teacher/activity/notifications/
+      - GET  /api/teacher/activity/panel/
+      - POST /api/teacher/activity/seed/
+      - POST /api/teacher/activity/close/
+      - POST /api/teacher/activity/mark-all-read/
+      - GET  /api/workspace/teacher-activity/notifications/
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.teacher = User.objects.create_user(
+            email='gopal@nodetheory.com',
+            password='TeacherPassword123!',
+            full_name='gopal',
+            account_type=AccountType.TEACHER,
+            department='Design & Technology'
+        )
+        self.token = AuthToken.create_for_user(self.teacher)
+        self.teacher_auth = {'HTTP_AUTHORIZATION': f'Bearer {self.token.key}'}
+
+        self.student = User.objects.create_user(
+            email='faris@nodetheory.com',
+            password='StudentPassword123!',
+            full_name='faris',
+            account_type=AccountType.STUDENT
+        )
+        self.student_token = AuthToken.create_for_user(self.student)
+        self.student_auth = {'HTTP_AUTHORIZATION': f'Bearer {self.student_token.key}'}
+
+    def test_teacher_activity_modal_structure_matching_screenshot(self):
+        """
+        Verify teacher notifications endpoint returns:
+        - Title: 'Teacher activity'
+        - Subtitle: 'Updates from your project workspace.'
+        - Buttons: Cancel and Close
+        """
+        res = self.client.get('/api/notifications/', **self.teacher_auth)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data['success'])
+        self.assertTrue(data['is_teacher'])
+
+        # Modal info matching media_1795200389663_d4e22e88.png
+        self.assertEqual(data['modal']['title'], 'Teacher activity')
+        self.assertEqual(data['modal']['subtitle'], 'Updates from your project workspace.')
+        self.assertEqual(data['modal']['cancel_label'], 'Cancel')
+        self.assertEqual(data['modal']['close_label'], 'Close')
+        self.assertTrue(data['modal']['close_icon'])
+
+        # Panel info
+        self.assertEqual(data['panel_info']['title'], 'Teacher activity')
+        self.assertEqual(data['panel_info']['subtitle'], 'Updates from your project workspace.')
+        self.assertEqual(data['panel_info']['buttons']['cancel'], 'Cancel')
+        self.assertEqual(data['panel_info']['buttons']['close'], 'Close')
+
+    def test_seed_teacher_activity_notifications_cards(self):
+        """
+        Verify seeding and displaying the 3 workspace cards from media_1795200389663_d4e22e88.png:
+        1. 'Review queue' - '3 student submissions are awaiting your feedback.' (Today)
+        2. 'Question received' - 'A student asked for clarification on project scope.' (Today)
+        3. 'Progress update' - 'The class is moving ahead on schedule.' (Yesterday)
+        """
+        seed_res = self.client.post('/api/teacher/activity/seed/', **self.teacher_auth)
+        self.assertEqual(seed_res.status_code, 201)
+        data = seed_res.json()
+        self.assertTrue(data['success'])
+        self.assertTrue(data['is_teacher'])
+        self.assertEqual(data['count'], 3)
+
+        notifs = data['notifications']
+
+        # Card 1: Review queue
+        n1 = notifs[0]
+        self.assertEqual(n1['title'], 'Review queue')
+        self.assertIn('student submissions are awaiting your feedback', n1['message'])
+        self.assertEqual(n1['relative_time'], 'Today')
+        self.assertEqual(n1['tag'], '')
+
+        # Card 2: Question received
+        n2 = notifs[1]
+        self.assertEqual(n2['title'], 'Question received')
+        self.assertEqual(n2['message'], 'A student asked for clarification on project scope.')
+        self.assertEqual(n2['relative_time'], 'Today')
+        self.assertEqual(n2['tag'], '')
+
+        # Card 3: Progress update
+        n3 = notifs[2]
+        self.assertEqual(n3['title'], 'Progress update')
+        self.assertEqual(n3['message'], 'The class is moving ahead on schedule.')
+        self.assertEqual(n3['relative_time'], 'Yesterday')
+        self.assertEqual(n3['tag'], '')
+
+    def test_teacher_activity_endpoints_and_panel(self):
+        """
+        Verify all dedicated Teacher Activity endpoints resolve and return the panel structure:
+        - GET /api/teacher/activity/notifications/
+        - GET /api/teacher/activity/panel/
+        - GET /api/workspace/teacher-activity/notifications/
+        - GET /api/workspace/teacher-activity/panel/
+        """
+        endpoints = [
+            '/api/teacher/activity/notifications/',
+            '/api/teacher/activity/panel/',
+            '/api/workspace/teacher-activity/notifications/',
+            '/api/workspace/teacher-activity/panel/',
+        ]
+        for ep in endpoints:
+            res = self.client.get(ep, **self.teacher_auth)
+            self.assertEqual(res.status_code, 200, f"Failed at endpoint {ep}")
+            data = res.json()
+            self.assertEqual(data['modal']['title'], 'Teacher activity')
+            self.assertEqual(data['panel_info']['title'], 'Teacher activity')
+            self.assertEqual(data['count'], 3)
+            self.assertEqual(data['notifications'][0]['title'], 'Review queue')
+            self.assertEqual(data['notifications'][1]['title'], 'Question received')
+            self.assertEqual(data['notifications'][2]['title'], 'Progress update')
+
+    def test_teacher_activity_close_and_mark_all_read(self):
+        """
+        Verify closing panel with mark_read=true or mark-all-read marks teacher notifications as read:
+        - POST /api/teacher/activity/close/?mark_read=true
+        - POST /api/teacher/activity/mark-all-read/
+        """
+        # Ensure notifications exist and are unread
+        self.client.post('/api/teacher/activity/seed/', **self.teacher_auth)
+        self.assertEqual(Notification.objects.filter(recipient=self.teacher, is_read=False).count(), 3)
+
+        # Close with mark_read=true
+        close_res = self.client.post('/api/teacher/activity/close/?mark_read=true', **self.teacher_auth)
+        self.assertEqual(close_res.status_code, 200)
+        self.assertEqual(close_res.json()['unread_count'], 0)
+        self.assertEqual(Notification.objects.filter(recipient=self.teacher, is_read=False).count(), 0)
+
+        # Mark all read endpoint check
+        Notification.objects.filter(recipient=self.teacher).update(is_read=False)
+        self.assertEqual(Notification.objects.filter(recipient=self.teacher, is_read=False).count(), 3)
+        read_all_res = self.client.post('/api/teacher/activity/mark-all-read/', **self.teacher_auth)
+        self.assertEqual(read_all_res.status_code, 200)
+        self.assertEqual(Notification.objects.filter(recipient=self.teacher, is_read=False).count(), 0)
+
+    def test_student_and_teacher_notifications_isolation(self):
+        """
+        Verify student notifications still render 'Your notifications' with 'Submission status' (Node Theory tag)
+        while teacher notifications render 'Teacher activity' with 'Review queue', 'Question received', 'Progress update'.
+        """
+        # Student
+        student_res = self.client.get('/api/notifications/?seed=1', **self.student_auth)
+        self.assertEqual(student_res.status_code, 200)
+        student_data = student_res.json()
+        self.assertEqual(student_data['modal']['title'], 'Your notifications')
+        self.assertEqual(student_data['notifications'][0]['title'], 'Submission status')
+        self.assertEqual(student_data['notifications'][0]['tag'], 'Node Theory')
+
+        # Teacher
+        teacher_res = self.client.get('/api/notifications/', **self.teacher_auth)
+        self.assertEqual(teacher_res.status_code, 200)
+        teacher_data = teacher_res.json()
+        self.assertEqual(teacher_data['modal']['title'], 'Teacher activity')
+        self.assertEqual(teacher_data['notifications'][0]['title'], 'Review queue')
+        self.assertEqual(teacher_data['notifications'][0]['tag'], '')
+
+
+
+
+
+
 
 
 

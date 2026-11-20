@@ -23,14 +23,27 @@ urlpatterns = [
     path('csrf/', views.csrf_token_view, name='csrf'),
 
     # -------------------------------------------------------------------------
-    # Student Workspace Dashboard (Matches Student Dashboard Screenshot)
+    # Workspace Dashboard (Student & Teacher Dashboards)
     # -------------------------------------------------------------------------
     path('dashboard/', views.dashboard_view, name='dashboard'),
     path('workspace/dashboard/', views.dashboard_view, name='workspace-dashboard'),
     path('workspace/', views.dashboard_view, name='workspace'),
+    path('teacher/dashboard/', views.dashboard_view, name='teacher-dashboard'),
+    path('workspace/teacher-dashboard/', views.dashboard_view, name='workspace-teacher-dashboard'),
+    path('workspace/teacher/activity/', views.teacher_activity_view, name='workspace-teacher-activity'),
+    path('teacher/activity/', views.teacher_activity_view, name='teacher-activity'),
+
+    # Teacher Student Projects (Matches media_1795195613043_d9d98119.png)
+    path('teacher/student-projects/', views.teacher_student_projects_view, name='teacher-student-projects'),
+    path('teacher/student-projects/<int:pk>/', views.teacher_student_project_detail_view, name='teacher-student-project-detail'),
+    path('teacher/student-projects/<int:pk>/review/', views.project_review_view, name='teacher-student-project-review'),
+    path('teacher/student-projects/<int:pk>/feedback/', views.project_review_view, name='teacher-student-project-feedback'),
+    path('workspace/teacher/student-projects/', views.teacher_student_projects_view, name='workspace-teacher-student-projects'),
+    path('workspace/student-projects/', views.teacher_student_projects_view, name='workspace-student-projects'),
+    path('workspace/student-projects/<int:pk>/', views.teacher_student_project_detail_view, name='workspace-student-project-detail'),
 
     # -------------------------------------------------------------------------
-    # Notifications API (Top Navbar Bell Icon & Student Dashboard Modal)
+    # Notifications API (Top Navbar Bell Icon, Student Dashboard & Teacher Activity Modal)
     # -------------------------------------------------------------------------
     path('notifications/', views.notification_list_view, name='notification-list-create'),
     path('notifications/panel/', views.notification_list_view, name='notifications-panel'),
@@ -43,6 +56,17 @@ urlpatterns = [
     path('workspace/notifications/panel/', views.notification_list_view, name='workspace-notifications-panel'),
     path('workspace/notifications/close/', views.notification_close_view, name='workspace-notifications-close'),
     path('workspace/notifications/seed/', views.notification_seed_view, name='workspace-notifications-seed'),
+
+    # Teacher Activity Notification Modal (media_1795200389663_d4e22e88.png)
+    path('teacher/activity/notifications/', views.notification_list_view, name='teacher-activity-notifications'),
+    path('teacher/activity/panel/', views.notification_list_view, name='teacher-activity-panel'),
+    path('teacher/activity/close/', views.notification_close_view, name='teacher-activity-close'),
+    path('teacher/activity/seed/', views.notification_seed_view, name='teacher-activity-seed'),
+    path('teacher/activity/mark-all-read/', views.notification_mark_all_read_view, name='teacher-activity-mark-all-read'),
+    path('workspace/teacher-activity/notifications/', views.notification_list_view, name='workspace-teacher-activity-notifications'),
+    path('workspace/teacher-activity/panel/', views.notification_list_view, name='workspace-teacher-activity-panel'),
+    path('workspace/teacher-activity/close/', views.notification_close_view, name='workspace-teacher-activity-close'),
+    path('workspace/teacher-activity/seed/', views.notification_seed_view, name='workspace-teacher-activity-seed'),
 
     # -------------------------------------------------------------------------
     # Projects API (Active projects, Approved, Awaiting feedback, Recent projects)
@@ -64,17 +88,24 @@ urlpatterns = [
     # -------------------------------------------------------------------------
     path('topics/', views.topic_list_view, name='topic-list'),
     path('topics/upload/', views.topic_upload_view, name='topic-upload'),
+    path('topics/export/', views.topic_export_view, name='topic-export'),
     path('topics/select/', views.topic_select_view, name='topic-select'),
     path('topics/<str:pk_or_case>/select/', views.topic_select_view, name='topic-select-case'),
     path('topics/release/', views.topic_release_view, name='topic-release'),
     path('topics/<str:pk_or_case>/release/', views.topic_release_view, name='topic-release-case'),
     path('topics/<str:pk_or_case>/unselect/', views.topic_release_view, name='topic-unselect-case'),
+    path('topics/<str:pk_or_case>/assign-guide/', views.topic_assign_guide_view, name='topic-assign-guide'),
+    path('topics/<str:pk_or_case>/', views.topic_detail_view, name='topic-detail'),
 
     # Workspace / Data Aliases
     path('data/', views.topic_list_view, name='data-topics'),
     path('data/topics/', views.topic_list_view, name='data-topics-alias'),
     path('data/upload/', views.topic_upload_view, name='data-upload'),
+    path('data/export/', views.topic_export_view, name='data-export'),
+    path('data/topics/<str:pk_or_case>/', views.topic_detail_view, name='data-topic-detail'),
     path('workspace/data/', views.topic_list_view, name='workspace-data'),
+    path('workspace/data/upload/', views.topic_upload_view, name='workspace-data-upload'),
+    path('workspace/data/export/', views.topic_export_view, name='workspace-data-export'),
 
     # -------------------------------------------------------------------------
     # Queries & Teacher Q&A API (Workspace / Queries - Questions & Answers)
@@ -90,10 +121,23 @@ urlpatterns = [
     path('queries/', views.query_list_create_view, name='query-list-create'),
     path('queries/<int:pk>/', views.query_detail_view, name='query-detail'),
     path('queries/<int:pk>/reply/', views.query_reply_view, name='query-reply'),
+    path('queries/<int:pk>/answer/', views.query_reply_view, name='query-answer'),
+    path('teacher/queries/', views.queries_workspace_view, name='teacher-queries'),
+    path('teacher/queries/<int:pk>/', views.query_detail_view, name='teacher-query-detail'),
+    path('teacher/queries/<int:pk>/reply/', views.query_reply_view, name='teacher-query-reply'),
+    path('teacher/queries/<int:pk>/answer/', views.query_reply_view, name='teacher-query-answer'),
 
     # -------------------------------------------------------------------------
     # Teams & Team Invitations API (Matches Workspace / My team & Create Team Modal)
     # -------------------------------------------------------------------------
+    path('workspace/teams/', views.teacher_student_teams_projects_view, name='workspace-teams'),
+    path('workspace/student-teams/', views.teacher_student_teams_projects_view, name='workspace-student-teams'),
+    path('workspace/student-teams-projects/', views.teacher_student_teams_projects_view, name='workspace-student-teams-projects-alias'),
+    path('teacher/student-teams/', views.teacher_student_teams_projects_view, name='teacher-student-teams'),
+    path('teacher/student-teams/<int:pk>/', views.teacher_student_team_detail_view, name='teacher-student-team-detail'),
+    path('teacher/student-teams/<int:pk>/remind/', views.teacher_student_team_remind_view, name='teacher-student-team-remind'),
+    path('teacher/student-teams/<int:pk>/review/', views.teacher_student_team_review_view, name='teacher-student-team-review'),
+
     path('teams/my-team/', views.my_team_view, name='team-my-team'),
     path('workspace/my-team/', views.my_team_view, name='workspace-my-team'),
     path('teams/my-team/upload-project/', views.team_upload_project_view, name='team-my-team-upload-project'),

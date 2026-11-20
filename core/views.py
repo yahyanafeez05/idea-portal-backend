@@ -515,32 +515,298 @@ class DashboardAPIView(APIView):
 
         is_teacher = user.account_type in (AccountType.TEACHER, AccountType.FACULTY)
 
+        # Common notifications for bell icon
+        user_notifications = Notification.objects.filter(recipient=user)
+        unread_notifications_count = user_notifications.filter(is_read=False).count()
+        recent_notifications = [n.to_dict() for n in user_notifications[:5]]
+
         if is_teacher:
             # -------------------------------------------------------------
-            # TEACHER WORKSPACE DATA
+            # TEACHER WORKSPACE DATA (Matches Workspace / Teacher dashboard Screenshot)
             # -------------------------------------------------------------
-            all_student_projects = Project.objects.all()
-            active_projects_count = all_student_projects.exclude(status=ProjectStatus.COMPLETED).count()
-            approved_count = all_student_projects.filter(status=ProjectStatus.APPROVED).count()
-            awaiting_feedback_count = all_student_projects.filter(status__in=[ProjectStatus.AWAITING_REVIEW, 'in_review']).count()
+            teacher_name = user.full_name or user.email.split('@')[0]
+            first_name = teacher_name.split()[0] if teacher_name else 'Teacher'
 
-            recent_projects_items = [p.to_dict() for p in all_student_projects[:5]]
+            # 1. Four Exact Metric Calculations from Screenshot:
+            # - Students with submissions: distinct student accounts with submissions
+            # - Submitted projects: total submitted projects across students
+            # - Awaiting review: ready for teacher feedback
+            # - Reviewed: projects with a review status (approved, completed, rejected, feedback given)
+            submitted_statuses = [
+                ProjectStatus.SUBMITTED,
+                ProjectStatus.AWAITING_REVIEW,
+                ProjectStatus.APPROVED,
+                ProjectStatus.COMPLETED,
+                'in_review',
+                'under_review',
+            ]
+            students_with_submissions_count = Project.objects.filter(
+                status__in=submitted_statuses
+            ).values('owner').distinct().count()
 
-            # All student questions for teacher to answer
-            teacher_qa_queryset = Query.objects.select_related('asked_by', 'project').all()
-            teacher_qa_items = [q.to_dict() for q in teacher_qa_queryset[:5]]
+            submitted_projects_count = Project.objects.filter(
+                status__in=submitted_statuses
+            ).count()
 
-            hero_config = {
-                'tag': 'YOUR TEACHER WORKSPACE',
-                'mode': 'REVIEW MODE',
-                'title': 'Guide your students to success.',
-                'subtitle': 'Review student submissions, provide feedback, and answer student queries.'
+            awaiting_review_count = Project.objects.filter(
+                status__in=[ProjectStatus.AWAITING_REVIEW, 'in_review', 'under_review', ProjectStatus.SUBMITTED]
+            ).count()
+
+            reviewed_count = Project.objects.filter(
+                Q(status__in=[ProjectStatus.APPROVED, ProjectStatus.COMPLETED, ProjectStatus.REJECTED]) |
+                Q(reviewed_by__isnull=False) |
+                ~Q(feedback='')
+            ).distinct().count()
+
+            active_projects_count = Project.objects.exclude(status=ProjectStatus.COMPLETED).count()
+
+            # Metric stat cards structure
+            metric_cards = [
+                {
+                    'id': 'students_with_submissions',
+                    'label': 'Students with submissions',
+                    'title': 'Students with submissions',
+                    'value': f"{students_with_submissions_count:02d}",
+                    'count': students_with_submissions_count,
+                    'subtext': 'Student accounts',
+                    'icon': 'users'
+                },
+                {
+                    'id': 'submitted_projects',
+                    'label': 'Submitted projects',
+                    'title': 'Submitted projects',
+                    'value': f"{submitted_projects_count:02d}",
+                    'count': submitted_projects_count,
+                    'subtext': 'Across student accounts',
+                    'icon': 'folder'
+                },
+                {
+                    'id': 'awaiting_review',
+                    'label': 'Awaiting review',
+                    'title': 'Awaiting review',
+                    'value': f"{awaiting_review_count:02d}",
+                    'count': awaiting_review_count,
+                    'subtext': 'Ready for your feedback',
+                    'icon': 'clock'
+                },
+                {
+                    'id': 'reviewed',
+                    'label': 'Reviewed',
+                    'title': 'Reviewed',
+                    'value': f"{reviewed_count:02d}",
+                    'count': reviewed_count,
+                    'subtext': 'Projects with a review status',
+                    'icon': 'check'
+                }
+            ]
+
+            stats_payload = {
+                'students_with_submissions': students_with_submissions_count,
+                'students_with_submissions_formatted': f"{students_with_submissions_count:02d}",
+                'students_with_submissions_subtext': 'Student accounts',
+
+                'submitted_projects': submitted_projects_count,
+                'submitted_projects_formatted': f"{submitted_projects_count:02d}",
+                'submitted_projects_subtext': 'Across student accounts',
+
+                'awaiting_review': awaiting_review_count,
+                'awaiting_review_formatted': f"{awaiting_review_count:02d}",
+                'awaiting_review_subtext': 'Ready for your feedback',
+
+                'reviewed': reviewed_count,
+                'reviewed_formatted': f"{reviewed_count:02d}",
+                'reviewed_subtext': 'Projects with a review status',
+
+                # Aliases & backward compatibility
+                'active_projects': active_projects_count,
+                'active_projects_formatted': f"{active_projects_count:02d}",
+                'active_projects_subtext': 'Active student submissions',
+                'approved': reviewed_count,
+                'approved_formatted': f"{reviewed_count:02d}",
+                'approved_subtext': 'Projects with a review status',
+                'awaiting_feedback': awaiting_review_count,
+                'awaiting_feedback_formatted': f"{awaiting_review_count:02d}",
+                'awaiting_feedback_subtext': 'Ready for your feedback',
+                'projects': submitted_projects_count,
             }
-            subtitle = 'Your teacher workspace is ready. Review student projects and answer questions.'
-            active_subtext = 'Active student submissions'
-            awaiting_subtext = 'Awaiting your review'
-            recent_subtext = 'Latest student project submissions'
-            qa_subtext = 'Student questions awaiting reply'
+
+            # 2. Submissions to Review widget (with filter dropdown: 'All submissions', 'Awaiting review', 'Reviewed')
+            submission_filter = request.GET.get('submission_filter', 'all').strip().lower()
+            submissions_qs = Project.objects.select_related('owner', 'team', 'topic').order_by('-updated_at')
+            if submission_filter in ('awaiting_review', 'pending', 'awaiting'):
+                submissions_qs = submissions_qs.filter(status__in=[ProjectStatus.AWAITING_REVIEW, 'in_review', 'under_review', ProjectStatus.SUBMITTED])
+            elif submission_filter in ('reviewed', 'completed', 'evaluated'):
+                submissions_qs = submissions_qs.filter(
+                    Q(status__in=[ProjectStatus.APPROVED, ProjectStatus.COMPLETED, ProjectStatus.REJECTED]) |
+                    Q(reviewed_by__isnull=False) |
+                    ~Q(feedback='')
+                ).distinct()
+            elif submission_filter in ('approved',):
+                submissions_qs = submissions_qs.filter(status=ProjectStatus.APPROVED)
+            elif submission_filter in ('needs_changes', 'rejected'):
+                submissions_qs = submissions_qs.filter(status=ProjectStatus.REJECTED)
+            else:
+                submissions_qs = submissions_qs.filter(status__in=submitted_statuses)
+
+            submissions_items = []
+            for p in submissions_qs[:10]:
+                created_dt = p.updated_at or p.created_at
+                formatted_dt = created_dt.strftime('%b %d, %Y, %I:%M %p').replace(' 0', ' ') if created_dt else ''
+                submissions_items.append({
+                    'id': p.id,
+                    'title': p.title,
+                    'description': p.description,
+                    'student_name': p.owner.full_name if p.owner else '',
+                    'student_email': p.owner.email if p.owner else '',
+                    'team_name': p.team.name if p.team else None,
+                    'topic_code': p.topic.case_code if p.topic else None,
+                    'topic_title': p.topic.title if p.topic else None,
+                    'status': p.status,
+                    'status_display': p.get_status_display(),
+                    'progress': p.progress,
+                    'submitted_at': p.updated_at.isoformat() if p.updated_at else None,
+                    'formatted_date': formatted_dt,
+                    'subtext': f"Submitted by {p.owner.full_name if p.owner else 'Student'} · {formatted_dt}",
+                    'actions': {
+                        'review': f"/api/projects/{p.id}/review/",
+                        'view': f"/api/projects/{p.id}/",
+                    }
+                })
+
+            submissions_to_review_widget = {
+                'title': 'Submissions to review',
+                'subtext': 'Recent work from your students',
+                'filter': submission_filter,
+                'filter_options': [
+                    {'label': 'All submissions', 'value': 'all'},
+                    {'label': 'Awaiting review', 'value': 'awaiting_review'},
+                    {'label': 'Reviewed', 'value': 'reviewed'},
+                ],
+                'active_filter_label': 'All submissions' if submission_filter == 'all' else submission_filter.replace('_', ' ').capitalize(),
+                'empty_message': 'No student submissions match this filter yet.',
+                'count': len(submissions_items),
+                'items': submissions_items,
+            }
+
+            # 3. Student Questions widget (Matches: "Student questions", "Questions that could use your help", "View inbox →")
+            teacher_qa_queryset = Query.objects.select_related('asked_by', 'responded_by', 'project').order_by('-created_at')
+            student_questions_items = []
+            for q in teacher_qa_queryset[:10]:
+                created_dt = q.created_at
+                formatted_time = created_dt.strftime('%I:%M %p').lstrip('0') if created_dt else ''
+                formatted_date = f"{created_dt.strftime('%b %d, %Y')}, {formatted_time}" if created_dt else ''
+                student_name = q.asked_by.full_name if q.asked_by else 'Student'
+                is_answered = bool(q.response or q.status == QueryStatus.ANSWERED)
+                student_questions_items.append({
+                    'id': q.id,
+                    'title': q.title,
+                    'description': q.description,
+                    'question': q.description,
+                    'student_name': student_name,
+                    'student_email': q.asked_by.email if q.asked_by else '',
+                    'submitted_by': student_name,
+                    'formatted_date': formatted_date,
+                    'subtext': f"Submitted by {student_name} · {formatted_date}",
+                    'indicator_color': 'grey' if is_answered else 'teal',
+                    'status': q.status,
+                    'status_display': q.get_status_display(),
+                    'is_answered': is_answered,
+                    'action_text': 'Edit answer' if is_answered else 'Answer question',
+                    'action_url': f"/workspace/queries/{q.id}/reply/",
+                    'inbox_url': '/workspace/queries/',
+                    'response': q.response,
+                    'responded_at': q.responded_at.isoformat() if q.responded_at else None,
+                })
+
+            student_questions_widget = {
+                'title': 'Student questions',
+                'subtext': 'Questions that could use your help',
+                'link_text': 'View inbox →',
+                'link_url': '/workspace/queries/',
+                'empty_message': 'No student questions yet.',
+                'count': len(student_questions_items),
+                'items': student_questions_items,
+            }
+
+            classroom_dept = (user.department.upper() if getattr(user, 'department', None) else 'DESIGN & TECHNOLOGY')
+            hero_config = {
+                'tag': f"YOUR CLASSROOM · {classroom_dept}",
+                'mode': 'REVIEW MODE',
+                'title': 'A little feedback goes a long way.',
+                'subtitle': 'Review submissions and help every student progress.',
+                'button_text': 'Review submissions →',
+                'button_action': '/workspace/projects/?filter=awaiting_review',
+                'button_url': '/workspace/projects/?filter=awaiting_review',
+            }
+
+            open_queries_count = teacher_qa_queryset.filter(status=QueryStatus.OPEN).count()
+            sidebar_badges = {
+                'student_projects': active_projects_count,
+                'my_projects': active_projects_count,
+                'queries': open_queries_count,
+                'student_teams_projects': Team.objects.count(),
+                'unread_notifications': unread_notifications_count,
+                'unread_messages': Message.objects.filter(recipient=user, is_read=False).count(),
+                'chat': Message.objects.filter(recipient=user, is_read=False).count(),
+                'team_chat': 0,
+            }
+
+            sidebar_navigation = [
+                {'name': 'Dashboard', 'url': '/workspace/teacher-dashboard/', 'active': True, 'badge': None},
+                {'name': 'Student projects', 'url': '/workspace/student-projects/', 'active': False, 'badge': active_projects_count},
+                {'name': 'Data', 'url': '/workspace/data/', 'active': False, 'badge': None},
+                {'name': 'Student teams & projects', 'url': '/workspace/teams/', 'active': False, 'badge': None},
+                {'name': 'Queries', 'url': '/workspace/queries/', 'active': False, 'badge': open_queries_count},
+            ]
+
+            return JsonResponse({
+                'success': True,
+                'workspace': {
+                    'breadcrumb': 'Workspace / Teacher dashboard',
+                    'label': 'TEACHER WORKSPACE',
+                    'tag': 'TEACHER WORKSPACE',
+                    'greeting': greeting_text,
+                    'name': teacher_name,
+                    'full_greeting': f"{greeting_text}, {teacher_name}",
+                    'subtitle': "A quick look at your students' project progress.",
+                    'hero': hero_config,
+                    'action_button': {
+                        'text': 'View activity',
+                        'action': 'view_activity',
+                        'url': '/api/workspace/teacher/activity/',
+                    }
+                },
+                'user': {
+                    **user.to_dict(),
+                    'avatar_initial': teacher_name[0].upper() if teacher_name else 'T',
+                    'role_display': 'Teacher',
+                },
+                'stats': stats_payload,
+                'metric_cards': metric_cards,
+                'submissions_to_review': submissions_items,
+                'submissions_to_review_widget': submissions_to_review_widget,
+                'student_questions': student_questions_items,
+                'student_questions_widget': student_questions_widget,
+                # Backward compatibility
+                'recent_projects': submissions_items,
+                'recent_projects_widget': submissions_to_review_widget,
+                'recent_projects_list': submissions_items,
+                'teacher_qa': student_questions_items,
+                'teacher_qa_widget': student_questions_widget,
+                'sidebar_badges': sidebar_badges,
+                'sidebar_navigation': sidebar_navigation,
+                'notifications': {
+                    'unread_count': unread_notifications_count,
+                    'recent': recent_notifications,
+                },
+                'help_center': {
+                    'title': 'Need a hand?',
+                    'description': 'Find tips for submitting projects and getting teacher feedback.',
+                    'link_text': 'Visit help center →',
+                    'link_url': '/help',
+                }
+            }, status=200)
+
         else:
             # -------------------------------------------------------------
             # STUDENT WORKSPACE DATA
@@ -567,84 +833,784 @@ class DashboardAPIView(APIView):
             recent_subtext = 'Your latest submissions and updates'
             qa_subtext = 'Your latest questions'
 
-        # Notifications for bell icon
-        user_notifications = Notification.objects.filter(recipient=user)
-        unread_notifications_count = user_notifications.filter(is_read=False).count()
-        recent_notifications = [n.to_dict() for n in user_notifications[:5]]
+            workspace_type = user.get_account_type_display().upper()
+            workspace_label = f"{workspace_type} WORKSPACE"
 
-        workspace_type = user.get_account_type_display().upper()
-        workspace_label = f"{workspace_type} WORKSPACE"
+            return JsonResponse({
+                'success': True,
+                'workspace': {
+                    'label': workspace_label,
+                    'greeting': greeting_text,
+                    'name': first_name,
+                    'full_greeting': f"{greeting_text}, {first_name} ✦",
+                    'subtitle': subtitle,
+                    'hero': hero_config
+                },
+                'user': {
+                    **user.to_dict(),
+                    'avatar_initial': first_name[0].upper() if first_name else 'F',
+                    'role_display': user.get_account_type_display(),
+                },
+                'stats': {
+                    'active_projects': active_projects_count,
+                    'active_projects_formatted': f"{active_projects_count:02d}",
+                    'active_projects_subtext': active_subtext,
+
+                    'approved': approved_count,
+                    'approved_formatted': f"{approved_count:02d}",
+                    'approved_subtext': "You're doing great!",
+
+                    'awaiting_feedback': awaiting_feedback_count,
+                    'awaiting_feedback_formatted': f"{awaiting_feedback_count:02d}",
+                    'awaiting_feedback_subtext': awaiting_subtext,
+
+                    'projects': active_projects_count,
+                    'awaiting_review': awaiting_feedback_count,
+                },
+                'recent_projects': recent_projects_items,
+                'recent_projects_widget': {
+                    'title': 'Recent projects',
+                    'subtext': recent_subtext,
+                    'link_text': 'View all →',
+                    'count': len(recent_projects_items),
+                    'items': recent_projects_items,
+                    'empty_message': 'No projects yet.',
+                },
+                'teacher_qa': teacher_qa_items,
+                'teacher_qa_widget': {
+                    'title': 'Teacher Q&A',
+                    'subtext': qa_subtext,
+                    'link_text': 'See all',
+                    'count': len(teacher_qa_items),
+                    'items': teacher_qa_items,
+                    'empty_message': 'No questions yet.',
+                },
+                'notifications': {
+                    'unread_count': unread_notifications_count,
+                    'recent': recent_notifications,
+                },
+                'sidebar_badges': {
+                    'my_projects': active_projects_count,
+                    'queries': teacher_qa_queryset.filter(status=QueryStatus.OPEN).count(),
+                    'unread_notifications': unread_notifications_count,
+                    'unread_messages': Message.objects.filter(recipient=user, is_read=False).count(),
+                    'chat': Message.objects.filter(recipient=user, is_read=False).count(),
+                    'team_chat': TeamMessage.objects.filter(
+                        Q(team__memberships__user=user) | Q(team__created_by=user) | Q(team__leader=user)
+                    ).distinct().exclude(read_by=user).count() if user else 0,
+                },
+                'recent_projects_list': recent_projects_items,
+            }, status=200)
+
+
+class TeacherActivityAPIView(APIView):
+    """
+    Teacher Activity Log & Event Feed:
+    Matches the 'View activity' button in the Teacher Workspace header.
+    Aggregates recent events across:
+    - Student project submissions
+    - Teacher project reviews & feedback
+    - Student questions submitted
+    - Teacher replies sent
+    - Team creations / project updates
+    """
+
+    def get(self, request, *args, **kwargs):
+        user = request.user if (request.user and request.user.is_authenticated) else User.objects.first()
+        if not user:
+            return JsonResponse({'success': False, 'message': 'Authentication required.'}, status=401)
+
+        activity_type = request.GET.get('type', 'all').strip().lower()
+        activities = []
+
+        # 1. Project Submissions
+        if activity_type in ('all', 'submissions'):
+            submitted_statuses = [
+                ProjectStatus.SUBMITTED,
+                ProjectStatus.AWAITING_REVIEW,
+                ProjectStatus.APPROVED,
+                ProjectStatus.COMPLETED,
+                'in_review',
+                'under_review',
+            ]
+            for p in Project.objects.filter(status__in=submitted_statuses).select_related('owner', 'team').order_by('-updated_at')[:15]:
+                created_dt = p.updated_at or p.created_at
+                formatted_dt = created_dt.strftime('%b %d, %Y, %I:%M %p').replace(' 0', ' ') if created_dt else ''
+                activities.append({
+                    'id': f"sub-{p.id}",
+                    'type': 'submission',
+                    'icon': 'folder',
+                    'title': f"Project submission: {p.title}",
+                    'description': f"{p.owner.full_name} submitted '{p.title}' for review.",
+                    'student_name': p.owner.full_name,
+                    'student_email': p.owner.email,
+                    'team_name': p.team.name if p.team else None,
+                    'status': p.status,
+                    'status_display': p.get_status_display(),
+                    'timestamp': created_dt.isoformat() if created_dt else None,
+                    'formatted_date': formatted_dt,
+                    'action_url': f"/projects/{p.id}/",
+                })
+
+        # 2. Teacher Reviews
+        if activity_type in ('all', 'reviews'):
+            for p in Project.objects.filter(reviewed_by__isnull=False).select_related('owner', 'reviewed_by').order_by('-reviewed_at')[:15]:
+                rev_dt = p.reviewed_at
+                formatted_dt = rev_dt.strftime('%b %d, %Y, %I:%M %p').replace(' 0', ' ') if rev_dt else ''
+                activities.append({
+                    'id': f"rev-{p.id}",
+                    'type': 'review',
+                    'icon': 'check',
+                    'title': f"Project reviewed: {p.title}",
+                    'description': f"Review completed for '{p.title}' - Status: {p.get_status_display()}.",
+                    'student_name': p.owner.full_name,
+                    'reviewer_name': p.reviewed_by.full_name if p.reviewed_by else 'Teacher',
+                    'status': p.status,
+                    'feedback': p.feedback,
+                    'timestamp': rev_dt.isoformat() if rev_dt else None,
+                    'formatted_date': formatted_dt,
+                    'action_url': f"/projects/{p.id}/",
+                })
+
+        # 3. Student Questions
+        if activity_type in ('all', 'questions', 'queries'):
+            for q in Query.objects.select_related('asked_by', 'responded_by').order_by('-created_at')[:15]:
+                q_dt = q.created_at
+                formatted_dt = q_dt.strftime('%b %d, %Y, %I:%M %p').replace(' 0', ' ') if q_dt else ''
+                activities.append({
+                    'id': f"q-{q.id}",
+                    'type': 'query',
+                    'icon': 'help-circle',
+                    'title': f"New question: {q.title}",
+                    'description': f"{q.asked_by.full_name} asked: '{q.description[:80]}...'",
+                    'student_name': q.asked_by.full_name,
+                    'status': q.status,
+                    'has_response': bool(q.response),
+                    'timestamp': q_dt.isoformat() if q_dt else None,
+                    'formatted_date': formatted_dt,
+                    'action_url': f"/workspace/queries/",
+                })
+
+        # 4. Teacher Question Replies
+        if activity_type in ('all', 'replies', 'queries'):
+            for q in Query.objects.filter(responded_by__isnull=False).select_related('asked_by', 'responded_by').order_by('-responded_at')[:15]:
+                ans_dt = q.responded_at
+                formatted_dt = ans_dt.strftime('%b %d, %Y, %I:%M %p').replace(' 0', ' ') if ans_dt else ''
+                activities.append({
+                    'id': f"ans-{q.id}",
+                    'type': 'reply',
+                    'icon': 'message-square',
+                    'title': f"Answer provided: {q.title}",
+                    'description': f"Replied to {q.asked_by.full_name}'s question: '{q.response[:80]}...'",
+                    'student_name': q.asked_by.full_name,
+                    'teacher_name': q.responded_by.full_name if q.responded_by else 'Teacher',
+                    'timestamp': ans_dt.isoformat() if ans_dt else None,
+                    'formatted_date': formatted_dt,
+                    'action_url': f"/workspace/queries/",
+                })
+
+        # Sort all activities by timestamp descending
+        activities.sort(key=lambda x: x.get('timestamp') or '', reverse=True)
 
         return JsonResponse({
             'success': True,
-            'workspace': {
-                'label': workspace_label,
-                'greeting': greeting_text,
-                'name': first_name,
-                'full_greeting': f"{greeting_text}, {first_name} ✦",
-                'subtitle': subtitle,
-                'hero': hero_config
-            },
-            'user': {
-                **user.to_dict(),
-                'avatar_initial': first_name[0].upper() if first_name else 'F',
-                'role_display': user.get_account_type_display(),
-            },
-            'stats': {
-                'active_projects': active_projects_count,
-                'active_projects_formatted': f"{active_projects_count:02d}",
-                'active_projects_subtext': active_subtext,
-
-                'approved': approved_count,
-                'approved_formatted': f"{approved_count:02d}",
-                'approved_subtext': "You're doing great!",
-
-                'awaiting_feedback': awaiting_feedback_count,
-                'awaiting_feedback_formatted': f"{awaiting_feedback_count:02d}",
-                'awaiting_feedback_subtext': awaiting_subtext,
-
-                'projects': active_projects_count,
-                'awaiting_review': awaiting_feedback_count,
-            },
-            'recent_projects': recent_projects_items,
-            'recent_projects_widget': {
-                'title': 'Recent projects',
-                'subtext': recent_subtext,
-                'link_text': 'View all →',
-                'count': len(recent_projects_items),
-                'items': recent_projects_items,
-                'empty_message': 'No projects yet.',
-            },
-            'teacher_qa': teacher_qa_items,
-            'teacher_qa_widget': {
-                'title': 'Teacher Q&A',
-                'subtext': qa_subtext,
-                'link_text': 'See all',
-                'count': len(teacher_qa_items),
-                'items': teacher_qa_items,
-                'empty_message': 'No questions yet.',
-            },
-            'notifications': {
-                'unread_count': unread_notifications_count,
-                'recent': recent_notifications,
-            },
-            'sidebar_badges': {
-                'my_projects': active_projects_count,
-                'queries': teacher_qa_queryset.filter(status=QueryStatus.OPEN).count(),
-                'unread_notifications': unread_notifications_count,
-                'unread_messages': Message.objects.filter(recipient=user, is_read=False).count(),
-                'chat': Message.objects.filter(recipient=user, is_read=False).count(),
-                'team_chat': TeamMessage.objects.filter(
-                    Q(team__memberships__user=user) | Q(team__created_by=user) | Q(team__leader=user)
-                ).distinct().exclude(read_by=user).count() if user else 0,
-            },
-            'recent_projects_list': recent_projects_items,
+            'breadcrumb': 'Workspace / Teacher dashboard / Activity',
+            'page_title': 'Teacher Workspace Activity',
+            'filter': activity_type,
+            'total_activities': len(activities),
+            'activities': activities,
         }, status=200)
 
 
 # ==============================================================================
 # PROJECTS API ENDPOINTS
 # ==============================================================================
+
+def _get_teacher_student_projects_response(request, user):
+    """
+    Constructs the Teacher Workspace 'Student projects' screen response
+    matching screenshot media_1795195613043_d9d98119.png:
+    - Breadcrumb: Workspace / My projects
+    - Tag / Title: TEACHER WORKSPACE
+    - Subtitle: Select a project name to view student details, files, and submission information.
+    - Card: Student projects (0 projects across student accounts)
+    - Search Bar: Search projects or students (filters by title, desc, student name, email, team name, topic)
+    - Filter Dropdown: All projects ∨ (All projects, Awaiting review, Reviewed, Approved, Needs changes)
+    - Empty state: No student submissions match this filter yet.
+    - Detailed project payload with student details, team, topic, files, submission info, and review options.
+    """
+    qs = Project.objects.select_related('owner', 'team', 'reviewed_by', 'topic').prefetch_related('files').all()
+
+    # Real-time search across projects or students
+    search_query = (request.GET.get('search') or request.GET.get('q') or '').strip()
+    if search_query:
+        qs = qs.filter(
+            Q(title__icontains=search_query) |
+            Q(description__icontains=search_query) |
+            Q(owner__full_name__icontains=search_query) |
+            Q(owner__email__icontains=search_query) |
+            Q(team__name__icontains=search_query) |
+            Q(topic__case_code__icontains=search_query) |
+            Q(topic__title__icontains=search_query) |
+            Q(department__icontains=search_query)
+        )
+
+    # Status / Submission Filter ('All projects ∨')
+    filter_val = (request.GET.get('filter') or request.GET.get('status') or 'all').strip().lower()
+    if filter_val in ('awaiting_review', 'awaiting', 'pending'):
+        qs = qs.filter(status__in=[ProjectStatus.AWAITING_REVIEW, ProjectStatus.SUBMITTED, 'in_review', 'under_review'])
+    elif filter_val in ('reviewed', 'evaluated'):
+        qs = qs.filter(
+            Q(status__in=[ProjectStatus.APPROVED, ProjectStatus.COMPLETED, ProjectStatus.REJECTED]) |
+            Q(reviewed_by__isnull=False) |
+            ~Q(feedback='')
+        ).distinct()
+    elif filter_val in ('approved',):
+        qs = qs.filter(status=ProjectStatus.APPROVED)
+    elif filter_val in ('needs_changes', 'rejected', 'changes_requested'):
+        qs = qs.filter(status=ProjectStatus.REJECTED)
+    elif filter_val in ('in_progress', 'progress'):
+        qs = qs.filter(status=ProjectStatus.IN_PROGRESS)
+
+    ordering = request.GET.get('ordering', '-updated_at')
+    qs = qs.order_by(ordering)
+    student_projects_data = [p.to_dict() for p in qs]
+
+    open_queries_count = Query.objects.filter(status=QueryStatus.OPEN).count()
+    active_projects_count = Project.objects.exclude(status=ProjectStatus.COMPLETED).count()
+
+    filter_label = 'All projects'
+    if filter_val in ('awaiting_review', 'awaiting'):
+        filter_label = 'Awaiting review'
+    elif filter_val == 'reviewed':
+        filter_label = 'Reviewed'
+    elif filter_val == 'approved':
+        filter_label = 'Approved'
+    elif filter_val in ('needs_changes', 'rejected'):
+        filter_label = 'Needs changes'
+
+    return JsonResponse({
+        'success': True,
+        'page_info': {
+            'breadcrumb': 'Workspace / My projects',
+            'tag': 'TEACHER WORKSPACE',
+            'title': 'TEACHER WORKSPACE',
+            'subtitle': 'Select a project name to view student details, files, and submission information.',
+        },
+        'student_projects': {
+            'title': 'Student projects',
+            'count': len(student_projects_data),
+            'subtext': f"{len(student_projects_data)} projects across student accounts",
+            'search': search_query,
+            'search_placeholder': 'Search projects or students',
+            'filter': filter_val,
+            'active_filter_label': filter_label,
+            'filter_options': [
+                {'label': 'All projects', 'value': 'all'},
+                {'label': 'Awaiting review', 'value': 'awaiting_review'},
+                {'label': 'Reviewed', 'value': 'reviewed'},
+                {'label': 'Approved', 'value': 'approved'},
+                {'label': 'Needs changes', 'value': 'needs_changes'},
+            ],
+            'empty_message': 'No student submissions match this filter yet.',
+            'items': student_projects_data,
+        },
+        'count': len(student_projects_data),
+        'projects': student_projects_data,
+        # Backward-compatible structures
+        'summary': {
+            'total_projects': len(student_projects_data),
+            'my_projects_count': len(student_projects_data),
+            'team_projects_count': 0,
+        },
+        'my_projects': {
+            'title': 'Student projects',
+            'count': len(student_projects_data),
+            'subtext': f"{len(student_projects_data)} projects across student accounts",
+            'items': student_projects_data,
+            'empty_message': 'No student submissions match this filter yet.',
+        },
+        'team_projects': {
+            'title': 'Team projects',
+            'subtext': 'Projects shared with teams you belong to',
+            'count': 0,
+            'items': [],
+            'empty_message': 'No team projects match your search.' if search_query else 'No team projects yet.',
+        },
+        'sidebar_badges': {
+            'student_projects': active_projects_count,
+            'my_projects': active_projects_count,
+            'queries': open_queries_count,
+            'student_teams_projects': Team.objects.count(),
+            'unread_notifications': Notification.objects.filter(recipient=user, is_read=False).count() if user else 0,
+            'chat': Message.objects.filter(recipient=user, is_read=False).count() if user else 0,
+            'team_chat': 0,
+        },
+        'sidebar_navigation': [
+            {'name': 'Dashboard', 'url': '/workspace/teacher-dashboard/', 'active': False, 'badge': None},
+            {'name': 'Student projects', 'url': '/workspace/student-projects/', 'active': True, 'badge': active_projects_count},
+            {'name': 'Data', 'url': '/workspace/data/', 'active': False, 'badge': None},
+            {'name': 'Student teams & projects', 'url': '/workspace/teams/', 'active': False, 'badge': None},
+            {'name': 'Queries', 'url': '/workspace/queries/', 'active': False, 'badge': open_queries_count},
+        ]
+    }, status=200)
+
+
+class TeacherStudentProjectsAPIView(APIView):
+    """
+    Dedicated REST API for the Teacher 'Student projects' workspace page (Screenshot: media_1795195613043_d9d98119.png):
+    GET /api/teacher/student-projects/
+    GET /api/workspace/student-projects/
+    """
+
+    def get(self, request, *args, **kwargs):
+        user = request.user if (request.user and request.user.is_authenticated) else User.objects.first()
+        if not user:
+            return JsonResponse({'success': False, 'code': 'UNAUTHORIZED', 'error': 'Authentication required.'}, status=401)
+        return _get_teacher_student_projects_response(request, user)
+
+
+class TeacherStudentProjectDetailAPIView(APIView):
+    """
+    REST API for selecting a single student project in Teacher Workspace:
+    - View student details (name, email, department, avatar initial, contact links)
+    - View team details (name, leader, members)
+    - View topic details (case code, title, domain, level)
+    - View files and deliverables (download URLs, sizes, types, timestamps)
+    - View submission info (status, submitted timestamp, GitHub & live URLs)
+    - Review submission action (Approve, Request changes, Leave feedback, Upload review file)
+    GET /api/teacher/student-projects/<int:pk>/
+    GET /api/workspace/student-projects/<int:pk>/
+    """
+
+    def get(self, request, pk, *args, **kwargs):
+        try:
+            project = Project.objects.select_related('owner', 'team', 'reviewed_by', 'topic').prefetch_related('files').get(pk=pk)
+        except Project.DoesNotExist:
+            return JsonResponse({'success': False, 'error': 'Project not found.'}, status=404)
+
+        data = project.to_dict()
+        return JsonResponse({
+            'success': True,
+            'breadcrumb': f"Workspace / Student projects / {project.title}",
+            'project': data,
+            'student': data.get('student'),
+            'team': data.get('team'),
+            'topic': data.get('topic'),
+            'files': data.get('files'),
+            'submission_info': data.get('submission_info'),
+            'options': data.get('options')
+        }, status=200)
+
+
+def _format_relative_time(dt):
+    """Formats a datetime into a human-readable relative time like '2 hours ago', 'Just now', 'Today'."""
+    if not dt:
+        return ''
+    now = timezone.now()
+    diff = now - dt
+    seconds = int(diff.total_seconds())
+    if seconds < 60:
+        return 'Just now'
+    elif seconds < 3600:
+        minutes = seconds // 60
+        return f"{minutes}m ago" if minutes > 1 else '1m ago'
+    elif seconds < 86400:
+        hours = seconds // 3600
+        return f"{hours}h ago" if hours > 1 else '1h ago'
+    elif seconds < 172800:
+        return 'Yesterday'
+    else:
+        days = seconds // 86400
+        return f"{days} days ago" if days > 1 else '1 day ago'
+
+
+def _build_team_project_card(team, user=None):
+    """
+    Builds the detailed team card dictionary for the Teacher 'Student teams & projects' workspace:
+    - Left side: Team name, 'Created by {name} · {count} members · {projects} projects'
+    - Center/right:
+      * When NOT submitted: 'This team has not submitted a project yet.'
+      * When SUBMITTED: Submission time, team members & accounts, project details, files, and teacher review options!
+    """
+    creator_name = team.created_by.full_name if team.created_by else 'Student'
+    creator_email = team.created_by.email if team.created_by else ''
+    members_qs = team.memberships.select_related('user').all()
+    members_count = members_qs.count()
+    projects_qs = team.projects.select_related('topic', 'owner', 'reviewed_by').prefetch_related('files').all()
+    projects_count = projects_qs.count()
+
+    # Subtext strictly matching screenshot: "Created by faris · 1 members · 0 projects"
+    subtext = f"Created by {creator_name} · {members_count} members · {projects_count} projects"
+
+    # Format member accounts list: "see each team member's name and account"
+    members_list = []
+    for m in members_qs:
+        u = m.user
+        initial = (u.full_name[0] if u.full_name else (u.email[0] if u.email else 'U')).upper()
+        members_list.append({
+            'id': u.id,
+            'full_name': u.full_name,
+            'name': u.full_name,
+            'email': u.email,
+            'account': u.email,
+            'account_id': u.email,
+            'role': m.role,
+            'is_leader': (team.leader_id == u.id) or (m.role.lower() == 'leader'),
+            'department': u.department,
+            'section': getattr(u, 'section', ''),
+            'account_type': u.get_account_type_display(),
+            'avatar_initial': initial,
+            'initial': initial.lower(),
+            'joined_at': m.joined_at.isoformat() if m.joined_at else None,
+            'chat_url': f"/workspace/chat/{u.email}/" if u.email else None
+        })
+
+    # Find the primary or submitted project
+    active_project = None
+    for p in projects_qs:
+        if p.status in (ProjectStatus.AWAITING_REVIEW, ProjectStatus.SUBMITTED, ProjectStatus.APPROVED, ProjectStatus.REJECTED):
+            active_project = p
+            break
+    if not active_project and projects_qs.exists():
+        active_project = projects_qs.first()
+
+    # Determine if this team has submitted a project
+    has_submitted_project = False
+    if active_project:
+        has_submitted_project = active_project.status in (
+            ProjectStatus.AWAITING_REVIEW, ProjectStatus.SUBMITTED, ProjectStatus.APPROVED, ProjectStatus.REJECTED, ProjectStatus.COMPLETED
+        ) or bool(active_project.submitted_at) or (active_project.progress == 100) or active_project.files.exists()
+
+    if has_submitted_project and active_project:
+        # Effective submission time
+        sub_time = active_project.submitted_at or active_project.updated_at or active_project.created_at
+        formatted_sub_time = sub_time.strftime('%b %d, %Y, %I:%M %p').replace(' 0', ' ') if sub_time else ''
+        relative_sub_time = _format_relative_time(sub_time)
+
+        # Status badge styling
+        if active_project.status == ProjectStatus.APPROVED:
+            status_pill = {'label': 'Approved', 'color': 'emerald', 'variant': 'success'}
+        elif active_project.status == ProjectStatus.REJECTED:
+            status_pill = {'label': 'Needs changes', 'color': 'rose', 'variant': 'danger'}
+        elif active_project.status in (ProjectStatus.AWAITING_REVIEW, ProjectStatus.SUBMITTED):
+            status_pill = {'label': 'Awaiting review', 'color': 'amber', 'variant': 'warning'}
+        elif active_project.status == ProjectStatus.IN_PROGRESS:
+            status_pill = {'label': 'In progress', 'color': 'cyan', 'variant': 'info'}
+        else:
+            status_pill = {'label': active_project.get_status_display(), 'color': 'gray', 'variant': 'secondary'}
+
+        files_data = [
+            {
+                'id': f.id,
+                'filename': f.filename,
+                'name': f.filename,
+                'file_url': f.get_download_url() if hasattr(f, 'get_download_url') else (f.file.url if f.file else ''),
+                'file_size': f.file_size,
+                'file_type': f.file_type,
+                'uploaded_at': f.created_at.isoformat() if hasattr(f, 'created_at') and f.created_at else None
+            }
+            for f in active_project.files.all()
+        ]
+
+        project_dict = {
+            'id': active_project.id,
+            'title': active_project.title,
+            'description': active_project.description,
+            'status': active_project.status,
+            'status_display': active_project.get_status_display(),
+            'progress': active_project.progress,
+            'progress_display': f"{active_project.progress}%",
+            'topic': {
+                'case_code': active_project.topic.case_code,
+                'case': active_project.topic.case_code,
+                'title': active_project.topic.title,
+                'domain': active_project.topic.domain,
+                'level': active_project.topic.level
+            } if active_project.topic else None,
+            'topic_code': active_project.topic.case_code if active_project.topic else None,
+            'topic_title': active_project.topic.title if active_project.topic else None,
+            'submission_time': {
+                'submitted_at': sub_time.isoformat() if sub_time else None,
+                'formatted_submission_time': formatted_sub_time,
+                'relative_submission_time': relative_sub_time,
+                'date': sub_time.strftime('%b %d, %Y') if sub_time else '',
+                'time': sub_time.strftime('%I:%M %p').lstrip('0') if sub_time else ''
+            },
+            'submitted_at': sub_time.isoformat() if sub_time else None,
+            'formatted_submitted_at': formatted_sub_time,
+            'relative_submitted_at': relative_sub_time,
+            'github_url': active_project.github_url,
+            'live_url': active_project.live_url,
+            'files_count': len(files_data),
+            'files': files_data,
+            'feedback': active_project.feedback,
+            'grade': active_project.grade,
+            'reviewed_by': active_project.reviewed_by.full_name if active_project.reviewed_by else None,
+            'reviewed_at': active_project.reviewed_at.isoformat() if active_project.reviewed_at else None,
+        }
+
+        # New options available after submission
+        options = {
+            'has_submission': True,
+            'can_open_project': True,
+            'can_review': True,
+            'can_grade': True,
+            'can_view_files': bool(len(files_data) > 0),
+            'status_pill': status_pill,
+            'actions': {
+                'open_project': f"/api/teacher/student-projects/{active_project.id}/",
+                'review_submission': f"/api/teacher/student-projects/{active_project.id}/review/",
+                'grade_submission': f"/api/teacher/student-projects/{active_project.id}/review/",
+                'download_files': f"/api/projects/{active_project.id}/files/",
+                'view_members': f"/api/teams/{team.id}/members/",
+                'team_details': f"/api/teams/{team.id}/",
+            },
+            'review_modal': {
+                'endpoint': f"/api/teacher/student-projects/{active_project.id}/review/",
+                'method': 'POST',
+                'statuses': [
+                    {'value': 'approved', 'label': 'Approve project'},
+                    {'value': 'needs_changes', 'label': 'Request changes'},
+                    {'value': 'in_progress', 'label': 'Mark in progress'}
+                ],
+                'supports_feedback': True,
+                'supports_grade': True
+            }
+        }
+        empty_message = None
+    else:
+        # Not submitted yet state (matches Screenshot exactly: "This team has not submitted a project yet.")
+        project_dict = None
+        empty_message = "This team has not submitted a project yet."
+        options = {
+            'has_submission': False,
+            'can_open_project': False,
+            'can_review': False,
+            'can_grade': False,
+            'status_pill': {'label': 'Not submitted', 'color': 'gray', 'variant': 'secondary'},
+            'empty_state_text': "This team has not submitted a project yet.",
+            'actions': {
+                'view_members': f"/api/teams/{team.id}/members/",
+                'team_details': f"/api/teams/{team.id}/",
+                'send_reminder': f"/api/teacher/student-teams/{team.id}/remind/",
+            }
+        }
+
+    return {
+        'id': team.id,
+        'name': team.name,
+        'description': team.description,
+        'initial': team.name[0].lower() if team.name else 'x',
+        'subtext': subtext,
+        'created_by': {
+            'id': team.created_by.id if team.created_by else None,
+            'full_name': creator_name,
+            'email': creator_email,
+            'account_id': creator_email,
+            'department': team.created_by.department if team.created_by else ''
+        },
+        'members_count': members_count,
+        'projects_count': projects_count,
+        'has_submitted_project': has_submitted_project,
+        'submission_status': active_project.status if (has_submitted_project and active_project) else 'not_submitted',
+        'submission_message': empty_message,
+        'empty_message': empty_message,
+        'members': members_list,
+        'project': project_dict,
+        'options': options,
+        'created_at': team.created_at.isoformat() if team.created_at else None,
+    }
+
+
+class TeacherStudentTeamsProjectsAPIView(APIView):
+    """
+    REST API for the 4th section of the Teacher Dashboard:
+    'Workspace / Student teams & projects' (Screenshot: media_1795197971460_4d3418f5.png):
+    - Header Tag: 'TEACHER WORKSPACE'
+    - Title: 'Student teams & projects'
+    - Subtitle: 'Open a project to see its submission time and each team member\'s name and account.'
+    - Card:
+      * Team name (e.g. 'xander')
+      * Subtext: 'Created by faris · 1 members · 0 projects'
+      * When NOT submitted: 'This team has not submitted a project yet.'
+      * When SUBMITTED: Shows submission time, team members & accounts, project info, files, and teacher review options!
+    """
+    def get(self, request, *args, **kwargs):
+        user = request.user if (request.user and request.user.is_authenticated) else User.objects.first()
+
+        teams_qs = Team.objects.select_related('created_by', 'leader').prefetch_related(
+            'memberships__user',
+            'projects__topic',
+            'projects__files',
+            'projects__reviewed_by'
+        ).all().order_by('-created_at')
+
+        search_query = (request.GET.get('search') or request.GET.get('q') or '').strip()
+        if search_query:
+            teams_qs = teams_qs.filter(
+                Q(name__icontains=search_query) |
+                Q(created_by__full_name__icontains=search_query) |
+                Q(memberships__user__full_name__icontains=search_query) |
+                Q(projects__title__icontains=search_query)
+            ).distinct()
+
+        filter_status = (request.GET.get('filter') or request.GET.get('status') or 'all').strip().lower()
+        if filter_status in ('submitted', 'has_submission'):
+            teams_qs = teams_qs.filter(
+                projects__status__in=[
+                    ProjectStatus.AWAITING_REVIEW, ProjectStatus.SUBMITTED, ProjectStatus.APPROVED, ProjectStatus.REJECTED
+                ]
+            ).distinct()
+        elif filter_status in ('not_submitted', 'pending'):
+            teams_qs = teams_qs.exclude(
+                projects__status__in=[
+                    ProjectStatus.AWAITING_REVIEW, ProjectStatus.SUBMITTED, ProjectStatus.APPROVED, ProjectStatus.REJECTED
+                ]
+            ).distinct()
+        elif filter_status in ('awaiting_review', 'under_review'):
+            teams_qs = teams_qs.filter(
+                projects__status__in=[ProjectStatus.AWAITING_REVIEW, ProjectStatus.SUBMITTED]
+            ).distinct()
+        elif filter_status in ('approved',):
+            teams_qs = teams_qs.filter(projects__status=ProjectStatus.APPROVED).distinct()
+        elif filter_status in ('needs_changes', 'rejected'):
+            teams_qs = teams_qs.filter(projects__status=ProjectStatus.REJECTED).distinct()
+
+        teams_cards = [_build_team_project_card(t, user) for t in teams_qs]
+
+        submitted_count = sum(1 for c in teams_cards if c['has_submitted_project'])
+        not_submitted_count = len(teams_cards) - submitted_count
+        awaiting_count = sum(1 for c in teams_cards if c.get('submission_status') in (ProjectStatus.AWAITING_REVIEW, ProjectStatus.SUBMITTED))
+
+        active_projects_count = Project.objects.filter(status=ProjectStatus.AWAITING_REVIEW).count()
+        open_queries_count = Query.objects.filter(status=QueryStatus.OPEN).count()
+
+        return JsonResponse({
+            'success': True,
+            'header': {
+                'tag': 'TEACHER WORKSPACE',
+                'title': 'Student teams & projects',
+                'subtitle': "Open a project to see its submission time and each team member's name and account.",
+                'breadcrumb': 'Workspace / Student teams & projects'
+            },
+            'breadcrumb': 'Workspace / Student teams & projects',
+            'summary': {
+                'total_teams': len(teams_cards),
+                'teams_with_submissions': submitted_count,
+                'teams_without_submissions': not_submitted_count,
+                'teams_awaiting_review': awaiting_count,
+                'filtered_count': len(teams_cards)
+            },
+            'empty_state': {
+                'no_teams_message': 'No student teams created yet.',
+                'not_submitted_message': 'This team has not submitted a project yet.'
+            },
+            'count': len(teams_cards),
+            'teams': teams_cards,
+            'sidebar_badges': {
+                'student_projects': active_projects_count,
+                'my_projects': active_projects_count,
+                'queries': open_queries_count,
+                'student_teams_projects': len(teams_cards),
+                'unread_notifications': Notification.objects.filter(recipient=user, is_read=False).count() if user else 0,
+                'chat': Message.objects.filter(recipient=user, is_read=False).count() if user else 0,
+                'team_chat': 0,
+            },
+            'sidebar_navigation': [
+                {'name': 'Dashboard', 'url': '/workspace/teacher-dashboard/', 'active': False, 'badge': None},
+                {'name': 'Student projects', 'url': '/workspace/student-projects/', 'active': False, 'badge': active_projects_count},
+                {'name': 'Data', 'url': '/workspace/data/', 'active': False, 'badge': None},
+                {'name': 'Student teams & projects', 'url': '/workspace/teams/', 'active': True, 'badge': None},
+                {'name': 'Queries', 'url': '/workspace/queries/', 'active': False, 'badge': open_queries_count},
+            ]
+        }, status=200)
+
+
+class TeacherStudentTeamDetailAPIView(APIView):
+    """
+    REST API for a single team's submitted project and member accounts:
+    GET /api/teacher/student-teams/<int:pk>/
+    """
+    def get(self, request, pk, *args, **kwargs):
+        user = request.user if (request.user and request.user.is_authenticated) else User.objects.first()
+        try:
+            team = Team.objects.select_related('created_by', 'leader').prefetch_related(
+                'memberships__user', 'projects__topic', 'projects__files'
+            ).get(pk=pk)
+        except Team.DoesNotExist:
+            return JsonResponse({'success': False, 'error': 'Team not found.'}, status=404)
+
+        card = _build_team_project_card(team, user)
+        return JsonResponse({
+            'success': True,
+            'team': card,
+            'members': card['members'],
+            'project': card['project'],
+            'options': card['options'],
+            'submission_time': card['project']['submission_time'] if card.get('project') else None
+        }, status=200)
+
+
+class TeacherStudentTeamRemindAPIView(APIView):
+    """
+    Teacher action to send a project submission reminder to all members of a team:
+    POST /api/teacher/student-teams/<int:pk>/remind/
+    """
+    def post(self, request, pk, *args, **kwargs):
+        user = request.user if (request.user and request.user.is_authenticated) else User.objects.first()
+        try:
+            team = Team.objects.prefetch_related('memberships__user').get(pk=pk)
+        except Team.DoesNotExist:
+            return JsonResponse({'success': False, 'error': 'Team not found.'}, status=404)
+
+        teacher_name = user.full_name if user else 'Your teacher'
+        custom_message = request.data.get('message') or f"Prof. {teacher_name} is reminding your team '{team.name}' to submit your project."
+
+        notified_count = 0
+        for m in team.memberships.select_related('user').all():
+            if m.user != user:
+                create_notification(
+                    recipient=m.user,
+                    title="Project Submission Reminder ⏰",
+                    message=custom_message,
+                    notification_type=NotificationType.INFO,
+                    action_url="/workspace/my-team/",
+                    tag="Node Theory"
+                )
+                notified_count += 1
+
+        return JsonResponse({
+            'success': True,
+            'message': f"Submission reminder sent to {team.name} ({notified_count} members notified).",
+            'notified_count': notified_count,
+            'team_id': team.id,
+            'team_name': team.name
+        }, status=200)
+
+
+class TeacherStudentTeamReviewAPIView(APIView):
+    """
+    Teacher action to review a team's submitted project by team ID:
+    POST /api/teacher/student-teams/<int:pk>/review/
+    """
+    def post(self, request, pk, *args, **kwargs):
+        try:
+            team = Team.objects.get(pk=pk)
+        except Team.DoesNotExist:
+            return JsonResponse({'success': False, 'error': 'Team not found.'}, status=404)
+
+        project = team.projects.first()
+        if not project:
+            return JsonResponse({
+                'success': False,
+                'error': f"Team '{team.name}' has not submitted a project yet."
+            }, status=400)
+
+        # Delegate review to ProjectReviewAPIView logic
+        review_view = ProjectReviewAPIView()
+        return review_view.post(request, pk=project.id, *args, **kwargs)
+
 
 class ProjectListCreateAPIView(APIView):
     """
@@ -654,6 +1620,7 @@ class ProjectListCreateAPIView(APIView):
     - Real-time search across projects ('Search your projects')
     - Filters by workspace/department, status, and type ('my', 'team')
     - Creates new projects (with optional team assignment)
+    - Automatically serves Teacher Workspace view when accessed by Teacher/Faculty
     """
 
     def get(self, request, *args, **kwargs):
@@ -662,6 +1629,9 @@ class ProjectListCreateAPIView(APIView):
             return JsonResponse({'success': False, 'code': 'UNAUTHORIZED', 'error': 'Authentication required.'}, status=401)
 
         is_faculty = user.is_staff or user.account_type in (AccountType.TEACHER, AccountType.FACULTY)
+
+        if is_faculty:
+            return _get_teacher_student_projects_response(request, user)
 
         # Personal projects: projects owned by user with no team assigned
         my_qs = Project.objects.filter(owner=user, team__isnull=True).select_related('owner', 'team', 'reviewed_by')
@@ -960,14 +1930,20 @@ class ProjectSubmitReviewAPIView(APIView):
 
 class ProjectReviewAPIView(APIView):
     """
-    Faculty / Staff endpoint to approve or reject a project with feedback.
+    Teacher / Faculty endpoint to review, approve, request changes, or leave feedback on a student project:
+    - Approve project (status: 'approved')
+    - Request changes / Reject (status: 'needs_changes' or 'rejected')
+    - Mark in progress (status: 'in_progress')
+    - Leave review feedback notes (feedback: '...')
+    - Update progress percentage (progress: 0-100)
     POST /api/projects/<id>/review/
+    POST /api/teacher/student-projects/<id>/review/
     """
 
     def post(self, request, pk, *args, **kwargs):
         user = request.user if (request.user and request.user.is_authenticated) else User.objects.first()
         try:
-            project = Project.objects.get(pk=pk)
+            project = Project.objects.select_related('owner', 'team').get(pk=pk)
         except Project.DoesNotExist:
             return JsonResponse({'success': False, 'error': 'Project not found.'}, status=404)
 
@@ -975,36 +1951,80 @@ class ProjectReviewAPIView(APIView):
         decision = data.get('status', '').strip().lower()
         feedback = data.get('feedback', '').strip()
 
-        if decision not in ('approved', 'rejected'):
-            return JsonResponse({'success': False, 'error': "Status must be 'approved' or 'rejected'."}, status=400)
+        if decision in ('approved', 'approve'):
+            project.status = ProjectStatus.APPROVED
+            if not project.progress or project.progress < 100:
+                project.progress = 100
+            notif_title = "Project Approved! 🎉"
+            notif_msg = f"Congratulations! Your project '{project.title}' has been approved."
+            notif_type = NotificationType.PROJECT_APPROVED
+        elif decision in ('rejected', 'needs_changes', 'needs-changes', 'changes_requested'):
+            project.status = ProjectStatus.REJECTED
+            notif_title = "Changes Requested on Project"
+            notif_msg = f"Your teacher requested changes on '{project.title}': {feedback or 'Please check review notes.'}"
+            notif_type = NotificationType.PROJECT_FEEDBACK
+        elif decision in ('in_progress', 'progress'):
+            project.status = ProjectStatus.IN_PROGRESS
+            notif_title = "Project In Progress"
+            notif_msg = f"Your project '{project.title}' has been marked in progress."
+            notif_type = NotificationType.PROJECT_FEEDBACK
+        elif decision in ('awaiting_review', 'in_review', 'under_review'):
+            project.status = ProjectStatus.AWAITING_REVIEW
+            notif_title = "Project Under Review"
+            notif_msg = f"Your project '{project.title}' is currently under review."
+            notif_type = NotificationType.SUBMISSION_STATUS
+        elif not decision and feedback:
+            # Feedback only
+            notif_title = "Project Feedback Available"
+            notif_msg = f"Your teacher left feedback on '{project.title}': {feedback}"
+            notif_type = NotificationType.PROJECT_FEEDBACK
+        else:
+            return JsonResponse({
+                'success': False,
+                'error': "Status must be 'approved', 'rejected', 'needs_changes', or provide feedback."
+            }, status=400)
 
-        project.status = ProjectStatus.APPROVED if decision == 'approved' else ProjectStatus.REJECTED
-        project.feedback = feedback
+        if feedback:
+            project.feedback = feedback
+        if 'grade' in data and data['grade']:
+            project.grade = str(data['grade']).strip()
+        if 'progress' in data:
+            try:
+                project.progress = max(0, min(100, int(data['progress'])))
+            except (ValueError, TypeError):
+                pass
+
         project.reviewed_by = user
         project.reviewed_at = timezone.now()
         project.save()
 
-        # Create notification for student
-        if decision == 'approved':
+        # Create notification for student with tag 'Node Theory'
+        if project.owner:
             create_notification(
                 recipient=project.owner,
-                title="Project Approved! 🎉",
-                message=f"Congratulations! Your project '{project.title}' has been approved.",
-                notification_type=NotificationType.PROJECT_APPROVED,
-                action_url=f"/projects/{project.id}"
+                title=notif_title,
+                message=notif_msg,
+                notification_type=notif_type,
+                action_url=f"/projects/{project.id}",
+                tag="Node Theory"
             )
-        else:
-            create_notification(
-                recipient=project.owner,
-                title="Project Feedback Available",
-                message=f"Your teacher left feedback on '{project.title}': {feedback or 'Please check notes.'}",
-                notification_type=NotificationType.PROJECT_FEEDBACK,
-                action_url=f"/projects/{project.id}"
-            )
+
+        # Notify other team members if team project
+        if project.team:
+            for member in project.team.memberships.select_related('user').all():
+                if member.user != project.owner and member.user != user:
+                    create_notification(
+                        recipient=member.user,
+                        title=notif_title,
+                        message=notif_msg,
+                        notification_type=notif_type,
+                        action_url="/workspace/my-team/",
+                        tag="Node Theory"
+                    )
 
         return JsonResponse({
             'success': True,
-            'message': f'Project {project.status}.',
+            'message': f"Project {project.get_status_display()}.",
             'project': project.to_dict()
         }, status=200)
 
@@ -1015,12 +2035,19 @@ class ProjectReviewAPIView(APIView):
 
 class TopicListAPIView(APIView):
     """
-    REST API for the 'Workspace / Data' Topics Screen:
-    - Lists all project case topics with their classifications (Case, Title, Domain, Level, Team ID, Guide, Status).
-    - Seeds default 11 healthcare topics if dataset is empty.
+    REST API for the 'Workspace / Data' Topics Screen (Screenshot: media_1795197028583_babd1550.png):
+    - Breadcrumb: 'Workspace / Data'
+    - Tag: 'DATA'
+    - Title: 'Topics'
+    - Subtitle: 'Upload a file to replace or add your dataset, or review the sample AI use-case topics below.'
+    - Upload Action Button: 'Upload file'
+    - Topics Card Table:
+        * Columns: Case, Title, Domain, Level, Team ID, Guide, Status
+        * Seeds default 11 healthcare topics (H1 to H11) if dataset is empty.
     - Real-time search across topics (search / q query param).
-    - Filter by domain, level, and status (available, selected).
+    - Filter by domain, level, and status (available, selected, assigned).
     - Identifies if the current user's team already has a project/topic selected.
+    - Support POST to add topics individually or in bulk.
     """
     def get(self, request, *args, **kwargs):
         # Auto-seed default topics if empty
@@ -1066,6 +2093,9 @@ class TopicListAPIView(APIView):
         available_count = Topic.objects.filter(status=TopicStatus.AVAILABLE, team__isnull=True).count()
         selected_count = total_count - available_count
 
+        open_queries_count = Query.objects.filter(status=QueryStatus.OPEN).count()
+        active_projects_count = Project.objects.exclude(status=ProjectStatus.COMPLETED).count()
+
         # User/team current selection check
         user_selection = None
         if user_team:
@@ -1089,13 +2119,44 @@ class TopicListAPIView(APIView):
                     'selection_message': f"You have selected '{user_topic.case_code}: {user_topic.title}'."
                 }
 
+        header_data = {
+            'tag': 'DATA',
+            'title': 'Topics',
+            'subtitle': 'Upload a file to replace or add your dataset, or review the sample AI use-case topics below.',
+            'breadcrumb': 'Workspace / Data'
+        }
+
         return JsonResponse({
             'success': True,
-            'page_info': {
-                'tag': 'DATA',
+            'header': header_data,
+            'page_info': header_data,
+            'breadcrumb': 'Workspace / Data',
+            'upload_action': {
+                'button_text': 'Upload file',
+                'title': 'Upload dataset',
+                'endpoint': '/api/topics/upload/',
+                'method': 'POST',
+                'supported_formats': ['csv', 'json', 'txt'],
+                'modes': [
+                    {'value': 'add', 'label': 'Add to dataset (Append / Update)'},
+                    {'value': 'replace', 'label': 'Replace dataset'}
+                ]
+            },
+            'table': {
                 'title': 'Topics',
-                'subtitle': 'Upload a file to replace or add your dataset, or review the sample AI use-case topics below.',
-                'breadcrumb': 'Workspace / Data'
+                'subtext': 'AI project case topics and their classifications.',
+                'columns': [
+                    {'key': 'case', 'label': 'Case'},
+                    {'key': 'title', 'label': 'Title'},
+                    {'key': 'domain', 'label': 'Domain'},
+                    {'key': 'level', 'label': 'Level'},
+                    {'key': 'team_id', 'label': 'Team ID'},
+                    {'key': 'guide', 'label': 'Guide'},
+                    {'key': 'status', 'label': 'Status'},
+                ],
+                'rows': topics_data,
+                'count': len(topics_data),
+                'empty_message': 'No topics found matching your criteria.'
             },
             'summary': {
                 'total_topics': total_count,
@@ -1104,15 +2165,72 @@ class TopicListAPIView(APIView):
                 'filtered_count': len(topics_data)
             },
             'user_team_selection': user_selection,
-            'topics': topics_data
+            'topics': topics_data,
+            'sidebar_badges': {
+                'student_projects': active_projects_count,
+                'my_projects': active_projects_count,
+                'queries': open_queries_count,
+                'unread_notifications': Notification.objects.filter(recipient=user, is_read=False).count() if user else 0,
+                'chat': Message.objects.filter(recipient=user, is_read=False).count() if user else 0,
+                'team_chat': 0,
+            },
+            'sidebar_navigation': [
+                {'name': 'Dashboard', 'url': '/workspace/teacher-dashboard/', 'active': False, 'badge': None},
+                {'name': 'Student projects', 'url': '/workspace/student-projects/', 'active': False, 'badge': active_projects_count},
+                {'name': 'Data', 'url': '/workspace/data/', 'active': True, 'badge': None},
+                {'name': 'Student teams & projects', 'url': '/workspace/teams/', 'active': False, 'badge': None},
+                {'name': 'Queries', 'url': '/workspace/queries/', 'active': False, 'badge': open_queries_count},
+            ]
         }, status=200)
+
+    def post(self, request, *args, **kwargs):
+        """Creates or updates a single topic."""
+        data = request.data or {}
+        case_code = data.get('case_code') or data.get('case') or data.get('code')
+        title = data.get('title')
+        if not case_code or not title:
+            return JsonResponse({'success': False, 'error': 'Both case code and title are required.'}, status=400)
+
+        case_code = str(case_code).strip()
+        title = str(title).strip()
+        domain = str(data.get('domain') or 'Healthcare').strip()
+        level = str(data.get('level') or 'Moderate').strip()
+        guide = str(data.get('guide') or '').strip()
+
+        topic, created = Topic.objects.get_or_create(
+            case_code=case_code,
+            defaults={
+                'title': title,
+                'domain': domain,
+                'level': level,
+                'guide': guide,
+                'status': TopicStatus.AVAILABLE
+            }
+        )
+        if not created:
+            topic.title = title
+            topic.domain = domain
+            topic.level = level
+            if guide:
+                topic.guide = guide
+            topic.save()
+
+        return JsonResponse({
+            'success': True,
+            'message': f"Topic '{topic.case_code}' {'created' if created else 'updated'} successfully.",
+            'topic': topic.to_dict(),
+            'created': created
+        }, status=201 if created else 200)
 
 
 class TopicUploadAPIView(APIView):
     """
-    REST API for 'Upload file' on Workspace / Data screen:
-    'Upload a file to replace or add your dataset'
-    Supports CSV, JSON, and form files.
+    REST API for 'Upload file' on Workspace / Data screen (Screenshot: media_1795197028583_babd1550.png):
+    'Upload a file to replace or add your dataset, or review the sample AI use-case topics below.'
+    Supports CSV, JSON, and text files.
+    Modes:
+      - replace=true: deletes available topics and installs new dataset.
+      - replace=false (default): adds new topics and updates existing matching codes.
     """
     def post(self, request, *args, **kwargs):
         # Determine replace mode
@@ -1121,7 +2239,7 @@ class TopicUploadAPIView(APIView):
         if str(replace_val).lower() in ('true', '1', 'yes'):
             replace_mode = True
 
-        uploaded_file = request.FILES.get('file') or request.FILES.get('dataset')
+        uploaded_file = request.FILES.get('file') or request.FILES.get('dataset') or request.FILES.get('upload')
         topics_payload = None
 
         if uploaded_file:
@@ -1129,9 +2247,16 @@ class TopicUploadAPIView(APIView):
                 content = uploaded_file.read().decode('utf-8', errors='replace')
                 name = uploaded_file.name.lower()
                 if name.endswith('.json'):
-                    topics_payload = json.loads(content)
+                    parsed_json = json.loads(content)
+                    if isinstance(parsed_json, dict) and 'topics' in parsed_json:
+                        topics_payload = parsed_json['topics']
+                    elif isinstance(parsed_json, list):
+                        topics_payload = parsed_json
+                    else:
+                        topics_payload = [parsed_json]
                 else:
-                    reader = csv.reader(io.StringIO(content))
+                    delimiter = '\t' if name.endswith('.tsv') else ','
+                    reader = csv.reader(io.StringIO(content), delimiter=delimiter)
                     rows = list(reader)
                     if not rows:
                         return JsonResponse({'success': False, 'error': 'Uploaded file is empty.'}, status=400)
@@ -1141,10 +2266,10 @@ class TopicUploadAPIView(APIView):
                     title_idx = next((i for i, h in enumerate(header) if h in ('title', 'name', 'topic', 'project')), 1 if len(header) > 1 else 0)
                     domain_idx = next((i for i, h in enumerate(header) if h in ('domain', 'category', 'field')), 2 if len(header) > 2 else -1)
                     level_idx = next((i for i, h in enumerate(header) if h in ('level', 'difficulty', 'complexity')), 3 if len(header) > 3 else -1)
-                    guide_idx = next((i for i, h in enumerate(header) if h in ('guide', 'mentor', 'advisor')), 4 if len(header) > 4 else -1)
+                    guide_idx = next((i for i, h in enumerate(header) if h in ('guide', 'mentor', 'advisor', 'faculty')), 4 if len(header) > 4 else -1)
 
                     topics_payload = []
-                    start_row = 1 if any(h in ('case', 'title', 'domain', 'level') for h in header) else 0
+                    start_row = 1 if any(h in ('case', 'title', 'domain', 'level', 'guide') for h in header) else 0
                     for row in rows[start_row:]:
                         if not row or not any(row):
                             continue
@@ -1152,8 +2277,8 @@ class TopicUploadAPIView(APIView):
                         title = row[title_idx].strip() if len(row) > title_idx else ''
                         if not case_code or not title:
                             continue
-                        domain = row[domain_idx].strip() if (domain_idx != -1 and len(row) > domain_idx) else 'Healthcare'
-                        level = row[level_idx].strip() if (level_idx != -1 and len(row) > level_idx) else 'Moderate'
+                        domain = row[domain_idx].strip() if (domain_idx != -1 and len(row) > domain_idx and row[domain_idx].strip()) else 'Healthcare'
+                        level = row[level_idx].strip() if (level_idx != -1 and len(row) > level_idx and row[level_idx].strip()) else 'Moderate'
                         guide = row[guide_idx].strip() if (guide_idx != -1 and len(row) > guide_idx) else ''
                         topics_payload.append({
                             'case': case_code,
@@ -1166,6 +2291,8 @@ class TopicUploadAPIView(APIView):
                 return JsonResponse({'success': False, 'error': f'Failed to parse uploaded dataset file: {str(e)}'}, status=400)
         elif isinstance(request.data, dict) and 'topics' in request.data:
             topics_payload = request.data['topics']
+        elif isinstance(request.data, list):
+            topics_payload = request.data
 
         if not topics_payload or not isinstance(topics_payload, list):
             return JsonResponse({
@@ -1217,7 +2344,22 @@ class TopicUploadAPIView(APIView):
             'created_count': created_count,
             'updated_count': updated_count,
             'total_topics': len(all_topics),
-            'topics': all_topics
+            'topics': all_topics,
+            'table': {
+                'title': 'Topics',
+                'subtext': 'AI project case topics and their classifications.',
+                'columns': [
+                    {'key': 'case', 'label': 'Case'},
+                    {'key': 'title', 'label': 'Title'},
+                    {'key': 'domain', 'label': 'Domain'},
+                    {'key': 'level', 'label': 'Level'},
+                    {'key': 'team_id', 'label': 'Team ID'},
+                    {'key': 'guide', 'label': 'Guide'},
+                    {'key': 'status', 'label': 'Status'},
+                ],
+                'rows': all_topics,
+                'count': len(all_topics)
+            }
         }, status=201)
 
 
@@ -1395,6 +2537,168 @@ class TopicReleaseAPIView(APIView):
                 'topic': topic.to_dict(),
                 'deleted_projects_count': deleted_projects_count
             }, status=200)
+
+
+class TopicDetailAPIView(APIView):
+    """
+    REST API for a single Topic in 'Workspace / Data':
+    Supports:
+      - GET: Retrieve topic details, assigned team, projects, and classification.
+      - PUT / PATCH: Edit topic details (case_code, title, domain, level, guide, status).
+      - DELETE: Delete a topic.
+    """
+    def _get_topic(self, pk_or_case):
+        if not pk_or_case:
+            return None
+        pk_str = str(pk_or_case).strip()
+        if pk_str.isdigit():
+            topic = Topic.objects.filter(Q(id=int(pk_str)) | Q(case_code__iexact=pk_str)).first()
+        else:
+            topic = Topic.objects.filter(case_code__iexact=pk_str).first()
+        return topic
+
+    def get(self, request, pk_or_case=None, *args, **kwargs):
+        topic = self._get_topic(pk_or_case)
+        if not topic:
+            return JsonResponse({'success': False, 'code': 'TOPIC_NOT_FOUND', 'error': 'Topic not found.'}, status=404)
+
+        data = topic.to_dict()
+        projects = [p.to_dict() for p in Project.objects.filter(topic=topic)]
+        data['projects'] = projects
+        data['projects_count'] = len(projects)
+        return JsonResponse({'success': True, 'topic': data}, status=200)
+
+    def put(self, request, pk_or_case=None, *args, **kwargs):
+        return self.patch(request, pk_or_case, *args, **kwargs)
+
+    def patch(self, request, pk_or_case=None, *args, **kwargs):
+        topic = self._get_topic(pk_or_case)
+        if not topic:
+            return JsonResponse({'success': False, 'code': 'TOPIC_NOT_FOUND', 'error': 'Topic not found.'}, status=404)
+
+        data = request.data or {}
+        if 'title' in data and data['title']:
+            topic.title = str(data['title']).strip()
+        if 'domain' in data and data['domain']:
+            topic.domain = str(data['domain']).strip()
+        if 'level' in data and data['level']:
+            topic.level = str(data['level']).strip()
+        if 'guide' in data:
+            topic.guide = str(data['guide']).strip()
+        if 'case_code' in data and data['case_code']:
+            new_code = str(data['case_code']).strip()
+            if new_code.lower() != topic.case_code.lower() and Topic.objects.filter(case_code__iexact=new_code).exclude(pk=topic.pk).exists():
+                return JsonResponse({'success': False, 'error': f"Case code '{new_code}' already exists."}, status=400)
+            topic.case_code = new_code
+        if 'status' in data and data['status']:
+            st = str(data['status']).lower().strip()
+            if st in [c[0] for c in TopicStatus.choices]:
+                topic.status = st
+
+        topic.save()
+        return JsonResponse({
+            'success': True,
+            'message': f"Topic '{topic.case_code}' updated successfully.",
+            'topic': topic.to_dict()
+        }, status=200)
+
+    def delete(self, request, pk_or_case=None, *args, **kwargs):
+        topic = self._get_topic(pk_or_case)
+        if not topic:
+            return JsonResponse({'success': False, 'code': 'TOPIC_NOT_FOUND', 'error': 'Topic not found.'}, status=404)
+
+        case_code = topic.case_code
+        topic.delete()
+        return JsonResponse({
+            'success': True,
+            'message': f"Topic '{case_code}' deleted successfully."
+        }, status=200)
+
+
+class TopicAssignGuideAPIView(APIView):
+    """
+    REST API for assigning / updating the Faculty Guide for a topic.
+    """
+    def _get_topic(self, pk_or_case):
+        if not pk_or_case:
+            return None
+        pk_str = str(pk_or_case).strip()
+        if pk_str.isdigit():
+            topic = Topic.objects.filter(Q(id=int(pk_str)) | Q(case_code__iexact=pk_str)).first()
+        else:
+            topic = Topic.objects.filter(case_code__iexact=pk_str).first()
+        return topic
+
+    def post(self, request, pk_or_case=None, *args, **kwargs):
+        topic = self._get_topic(pk_or_case)
+        if not topic:
+            return JsonResponse({'success': False, 'code': 'TOPIC_NOT_FOUND', 'error': 'Topic not found.'}, status=404)
+
+        data = request.data or {}
+        guide_name = data.get('guide') or data.get('guide_name') or data.get('faculty_name')
+        if not guide_name and data.get('faculty_id'):
+            faculty_user = User.objects.filter(id=data['faculty_id']).first()
+            if faculty_user:
+                guide_name = faculty_user.full_name
+
+        if not guide_name:
+            user = request.user if (request.user and request.user.is_authenticated) else None
+            if user and user.account_type in (AccountType.TEACHER, AccountType.FACULTY):
+                guide_name = user.full_name
+
+        if not guide_name:
+            return JsonResponse({'success': False, 'error': 'Guide name or faculty_id is required.'}, status=400)
+
+        topic.guide = str(guide_name).strip()
+        topic.save()
+
+        return JsonResponse({
+            'success': True,
+            'message': f"Guide '{topic.guide}' assigned to topic '{topic.case_code}'.",
+            'topic': topic.to_dict()
+        }, status=200)
+
+
+class TopicExportAPIView(APIView):
+    """
+    REST API to export topics dataset in CSV or JSON format.
+    Matches Workspace / Data: Topics table columns:
+    Case, Title, Domain, Level, Team ID, Guide, Status
+    """
+    def get(self, request, *args, **kwargs):
+        if not Topic.objects.exists():
+            Topic.seed_defaults()
+
+        topics = Topic.objects.all().order_by('id')
+        export_format = request.GET.get('format', 'csv').lower().strip()
+
+        if export_format == 'json':
+            return JsonResponse({
+                'success': True,
+                'total': topics.count(),
+                'columns': ['Case', 'Title', 'Domain', 'Level', 'Team ID', 'Guide', 'Status'],
+                'topics': [t.to_dict() for t in topics]
+            }, status=200)
+
+        # Default CSV export
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = 'attachment; filename="topics_dataset.csv"'
+        writer = csv.writer(response)
+        writer.writerow(['Case', 'Title', 'Domain', 'Level', 'Team ID', 'Guide', 'Status'])
+
+        for t in topics:
+            team_id = str(t.team.id) if t.team else ''
+            writer.writerow([
+                t.case_code,
+                t.title,
+                t.domain,
+                t.level,
+                team_id,
+                t.guide or '',
+                t.get_status_display()
+            ])
+
+        return response
 
 
 class ProjectFileUploadAPIView(APIView):
@@ -2168,13 +3472,31 @@ class TeamUploadProjectAPIView(APIView):
                     uploaded_by=user
                 )
 
+        if 'github_url' in data:
+            project.github_url = data['github_url'].strip() or None
+        if 'live_url' in data:
+            project.live_url = data['live_url'].strip() or None
+
+        is_submitting = (
+            str(data.get('submit', '')).lower() in ('true', '1', 'yes') or
+            str(data.get('submit_for_review', '')).lower() in ('true', '1', 'yes') or
+            str(request.POST.get('submit', '')).lower() in ('true', '1', 'yes') or
+            str(data.get('status', '')).lower() in ('submitted', 'awaiting_review')
+        )
+        if is_submitting:
+            project.status = ProjectStatus.AWAITING_REVIEW
+            if project.progress < 100:
+                project.progress = 100
+            project.submitted_at = timezone.now()
+            project.save()
+
         # Notify team members
         for member in team.memberships.exclude(user=user).select_related('user'):
             create_notification(
                 recipient=member.user,
-                title=f"Project Uploaded: {project.title}",
-                message=f"{user.full_name} uploaded project '{project.title}' for team '{team.name}'.",
-                notification_type=NotificationType.INFO,
+                title=f"Project Submitted: {project.title}" if is_submitting else f"Project Uploaded: {project.title}",
+                message=f"{user.full_name} {'submitted' if is_submitting else 'uploaded'} project '{project.title}' for team '{team.name}'.",
+                notification_type=NotificationType.SUBMISSION_STATUS if is_submitting else NotificationType.INFO,
                 action_url="/workspace/my-projects/"
             )
 
@@ -2266,14 +3588,8 @@ class QueriesWorkspaceAPIView(APIView):
 
         if is_teacher:
             qs = Query.objects.select_related('asked_by', 'responded_by', 'project').all().order_by('-created_at')
-            card_title = "Student questions"
-            card_subtitle = "Questions asked by students needing your guidance."
-            empty_msg = "No student questions yet."
         else:
             qs = Query.objects.filter(asked_by=user).select_related('asked_by', 'responded_by', 'project').order_by('-created_at')
-            card_title = "Your questions"
-            card_subtitle = "Questions are shared with your teacher."
-            empty_msg = "No questions yet. Ask your teacher for guidance."
 
         # Filter by status if requested (?status=open or ?status=answered)
         status_filter = request.GET.get('status')
@@ -2289,34 +3605,79 @@ class QueriesWorkspaceAPIView(APIView):
         open_count = qs.filter(status=QueryStatus.OPEN).count()
         answered_count = qs.filter(status=QueryStatus.ANSWERED).count()
 
-        return JsonResponse({
-            'success': True,
-            'page_info': {
+        active_projects_count = Project.objects.filter(status=ProjectStatus.AWAITING_REVIEW).count()
+        total_teams_count = Team.objects.count()
+
+        if is_teacher:
+            header_data = {
+                'category': 'PING',
+                'tag': 'STUDENT QUESTIONS',
+                'title': 'Answer your students',
+                'subtitle': 'Review questions from your students and share helpful answers.',
+                'breadcrumb': 'Workspace / Queries',
+                'active_nav': 'queries',
+            }
+            card_title = "Student questions"
+            count_label = f"{len(queries_data)} question" if len(queries_data) == 1 else f"{len(queries_data)} questions"
+            card_subtitle = count_label
+            empty_msg = "No student questions yet."
+            action_btn = None
+        else:
+            header_data = {
                 'category': 'PING',
                 'tag': 'ASK YOUR TEACHER',
                 'title': 'Questions & answers',
                 'subtitle': 'Get guidance from your teacher as you work through your project.',
                 'breadcrumb': 'Workspace / Queries',
                 'active_nav': 'queries',
-            },
-            'action_button': {
+            }
+            card_title = "Your questions"
+            card_subtitle = "Questions are shared with your teacher."
+            empty_msg = "No questions yet. Ask your teacher for guidance."
+            action_btn = {
                 'label': '+ Ask a question',
                 'text': '+ Ask a question',
                 'action': 'open_ask_modal',
-            },
-            'card_info': {
-                'title': card_title,
-                'subtitle': card_subtitle,
-                'empty_message': empty_msg,
-                'bottom_link_text': '+ Ask your teacher a question',
-            },
+            }
+
+        sidebar_navigation = [
+            {'name': 'Dashboard', 'url': '/workspace/teacher-dashboard/' if is_teacher else '/workspace/dashboard/', 'active': False, 'badge': None},
+            {'name': 'Student projects', 'url': '/workspace/student-projects/', 'active': False, 'badge': active_projects_count} if is_teacher else {'name': 'My projects', 'url': '/workspace/my-projects/', 'active': False, 'badge': 0},
+            {'name': 'Data', 'url': '/workspace/data/', 'active': False, 'badge': None},
+            {'name': 'Student teams & projects', 'url': '/workspace/teams/', 'active': False, 'badge': None} if is_teacher else {'name': 'My team', 'url': '/workspace/my-team/', 'active': False, 'badge': None},
+            {'name': 'Queries', 'url': '/workspace/queries/', 'active': True, 'badge': open_count},
+        ]
+
+        card_data = {
+            'title': card_title,
+            'subtitle': card_subtitle,
+            'subtext': card_subtitle,
+            'count_label': card_subtitle,
+            'empty_message': empty_msg,
+            'bottom_link_text': '+ Ask your teacher a question' if not is_teacher else None,
+        }
+
+        return JsonResponse({
+            'success': True,
+            'header': header_data,
+            'page_info': header_data,
+            'breadcrumb': 'Workspace / Queries',
+            'action_button': action_btn,
+            'card_info': card_data,
+            'card': card_data,
             'count': len(queries_data),
             'open_count': open_count,
             'answered_count': answered_count,
             'queries': queries_data,
             'sidebar_badges': {
                 'queries': open_count,
-            }
+                'student_projects': active_projects_count,
+                'student_teams_projects': total_teams_count,
+                'unread_notifications': Notification.objects.filter(recipient=user, is_read=False).count() if user else 0,
+                'chat': Message.objects.filter(recipient=user, is_read=False).count() if user else 0,
+                'team_chat': 0,
+            },
+            'sidebar_navigation': sidebar_navigation
         }, status=200)
 
     def post(self, request, *args, **kwargs):
@@ -2426,7 +3787,29 @@ class QueryDetailAPIView(APIView):
             query = Query.objects.select_related('asked_by', 'responded_by', 'project').get(pk=pk)
         except Query.DoesNotExist:
             return JsonResponse({'success': False, 'error': 'Query not found.'}, status=404)
-        return JsonResponse({'success': True, 'query': query.to_dict(current_user=user)}, status=200)
+
+        query_dict = query.to_dict(current_user=user)
+        student_name = query.asked_by.full_name if query.asked_by else 'Student'
+        modal_info = {
+            'title': 'Question details',
+            'subtitle': f"Question from {student_name}",
+            'question': query.title,
+            'details': query.description,
+            'your_answer': query.response or '',
+            'answer': query.response or '',
+            'buttons': {
+                'cancel': 'Cancel',
+                'save': 'Save answer'
+            },
+            'save_endpoint': f"/api/queries/{query.id}/reply/",
+            'endpoint': f"/api/queries/{query.id}/reply/"
+        }
+
+        return JsonResponse({
+            'success': True,
+            'modal': modal_info,
+            'query': query_dict
+        }, status=200)
 
     def patch(self, request, pk, *args, **kwargs):
         user = request.user if (request.user and request.user.is_authenticated) else User.objects.first()
@@ -2436,6 +3819,32 @@ class QueryDetailAPIView(APIView):
             return JsonResponse({'success': False, 'error': 'Query not found.'}, status=404)
 
         data = request.data or {}
+        # If answering or editing answer
+        answer_text = (data.get('response') or data.get('answer') or data.get('your_answer') or data.get('reply') or '').strip()
+        if answer_text:
+            query.response = answer_text
+            query.responded_by = user
+            query.responded_at = timezone.now()
+            query.status = QueryStatus.ANSWERED
+            query.save(update_fields=['response', 'responded_by', 'responded_at', 'status', 'updated_at'])
+
+            teacher_display = f"Prof. {user.full_name}" if getattr(user, 'account_type', '') in (AccountType.TEACHER, AccountType.FACULTY) else user.full_name
+            reply_preview = answer_text if len(answer_text) <= 50 else answer_text[:47] + '...'
+
+            create_notification(
+                recipient=query.asked_by,
+                title=f"Teacher Answered Your Question: {query.title}",
+                message=f"{teacher_display} replied: \"{reply_preview}\"",
+                notification_type=NotificationType.QUERY_ANSWERED,
+                action_url=f"/workspace/queries/?id={query.id}",
+                tag="Node Theory"
+            )
+            return JsonResponse({
+                'success': True,
+                'message': 'Answer saved and sent to student.',
+                'query': query.to_dict(current_user=user)
+            }, status=200)
+
         if 'status' in data:
             query.status = data['status']
             query.save(update_fields=['status', 'updated_at'])
@@ -2449,6 +3858,9 @@ class QueryDetailAPIView(APIView):
             query.save(update_fields=['description', 'updated_at'])
 
         return JsonResponse({'success': True, 'query': query.to_dict(current_user=user)}, status=200)
+
+    def put(self, request, pk, *args, **kwargs):
+        return self.patch(request, pk, *args, **kwargs)
 
     def delete(self, request, pk, *args, **kwargs):
         user = request.user if (request.user and request.user.is_authenticated) else User.objects.first()
@@ -2473,6 +3885,7 @@ class QueryDetailAPIView(APIView):
 class QueryReplyAPIView(APIView):
     """
     POST /api/queries/<id>/reply/
+    POST /api/queries/<id>/answer/
     POST /api/teacher-qa/<id>/reply/
     """
 
@@ -2487,7 +3900,7 @@ class QueryReplyAPIView(APIView):
             return JsonResponse({'success': False, 'error': 'Query not found.'}, status=404)
 
         data = request.data or {}
-        response_text = (data.get('response') or data.get('answer') or data.get('reply') or '').strip()
+        response_text = (data.get('response') or data.get('answer') or data.get('your_answer') or data.get('reply') or '').strip()
         if not response_text:
             return JsonResponse({'success': False, 'error': 'Response text cannot be empty.'}, status=400)
 
@@ -2506,7 +3919,8 @@ class QueryReplyAPIView(APIView):
             title=f"Teacher Answered Your Question: {query.title}",
             message=f"{teacher_display} replied: \"{reply_preview}\"",
             notification_type=NotificationType.QUERY_ANSWERED,
-            action_url=f"/workspace/queries/?id={query.id}"
+            action_url=f"/workspace/queries/?id={query.id}",
+            tag="Node Theory"
         )
 
         return JsonResponse({
@@ -3085,19 +4499,74 @@ def seed_student_dashboard_notifications(user):
     Notification.objects.filter(id=n3.id).update(created_at=now - timezone.timedelta(days=1))
 
 
+def seed_teacher_dashboard_notifications(user):
+    """
+    Seeds the 3 workspace notifications from the Teacher Activity notification panel screenshot (media_1795200389663_d4e22e88.png):
+    1. 'Review queue' - '3 student submissions are awaiting your feedback.' (Today)
+    2. 'Question received' - 'A student asked for clarification on project scope.' (Today)
+    3. 'Progress update' - 'The class is moving ahead on schedule.' (Yesterday)
+    """
+    now = timezone.now()
+
+    # Calculate awaiting review count if available
+    awaiting_count = Project.objects.filter(status__in=[ProjectStatus.AWAITING_REVIEW, ProjectStatus.SUBMITTED]).count()
+    if awaiting_count <= 0:
+        awaiting_count = 3
+
+    n1 = Notification.objects.create(
+        recipient=user,
+        title="Review queue",
+        message=f"{awaiting_count} student submissions are awaiting your feedback.",
+        notification_type=NotificationType.REVIEW_QUEUE,
+        action_url="/workspace/student-projects/",
+        tag="",
+        is_read=False,
+    )
+    Notification.objects.filter(id=n1.id).update(created_at=now - timezone.timedelta(hours=2))
+
+    # Look for any recent query
+    recent_query = Query.objects.exclude(asked_by=user).order_by('-created_at').first()
+    query_msg = "A student asked for clarification on project scope."
+    if recent_query and recent_query.title and recent_query.title.lower() != 'sample 1':
+        query_msg = f"A student asked: {recent_query.title}"
+
+    n2 = Notification.objects.create(
+        recipient=user,
+        title="Question received",
+        message=query_msg,
+        notification_type=NotificationType.QUESTION_RECEIVED,
+        action_url="/workspace/queries/",
+        tag="",
+        is_read=False,
+    )
+    Notification.objects.filter(id=n2.id).update(created_at=now - timezone.timedelta(hours=5))
+
+    n3 = Notification.objects.create(
+        recipient=user,
+        title="Progress update",
+        message="The class is moving ahead on schedule.",
+        notification_type=NotificationType.PROGRESS_UPDATE,
+        action_url="/workspace/teacher-dashboard/",
+        tag="",
+        is_read=False,
+    )
+    Notification.objects.filter(id=n3.id).update(created_at=now - timezone.timedelta(days=1))
+
+
 class NotificationListAPIView(APIView):
     """
     GET  /api/notifications/
     POST /api/notifications/
 
-    Returns notifications matching the new modal structure in media_1795191141742_a61b9c81.png:
-      - Title: Your notifications
-      - Subtitle: Updates from your project workspace.
-      - Notification cards with:
-        - title ('Submission status', 'Project update', 'Teacher reply')
-        - message ('Your last project is currently under review.')
-        - tag / badge ('Node Theory' badge)
-        - relative time / time_ago ('2h ago', 'Today', 'Yesterday')
+    Returns notifications matching:
+      - Student modal structure (media_1795191141742_a61b9c81.png):
+        - Title: Your notifications
+        - Subtitle: Updates from your project workspace.
+        - Cards: Submission status, Project update, Teacher reply
+      - Teacher modal structure (media_1795200389663_d4e22e88.png):
+        - Title: Teacher activity
+        - Subtitle: Updates from your project workspace.
+        - Cards: Review queue, Question received, Progress update
       - Modal actions: Cancel, Close
     """
 
@@ -3106,10 +4575,24 @@ class NotificationListAPIView(APIView):
         if not user:
             return JsonResponse({'success': False, 'code': 'UNAUTHORIZED', 'error': 'Authentication required.'}, status=401)
 
+        is_teacher = (
+            user.is_staff or
+            getattr(user, 'account_type', '') in (AccountType.TEACHER, AccountType.FACULTY) or
+            request.GET.get('role') in ('teacher', 'faculty') or
+            '/teacher/' in request.path or
+            'teacher-activity' in request.path
+        )
+
         # Allow seeding default screenshot notifications if ?seed=1 or ?init=1
         if request.GET.get('seed') in ('1', 'true', 'yes') or request.GET.get('init') in ('1', 'true', 'yes'):
             if not Notification.objects.filter(recipient=user).exists():
-                seed_student_dashboard_notifications(user)
+                if is_teacher:
+                    seed_teacher_dashboard_notifications(user)
+                else:
+                    seed_student_dashboard_notifications(user)
+        elif not Notification.objects.filter(recipient=user).exists() and is_teacher:
+            # Auto-seed teacher activity notifications if teacher has none yet
+            seed_teacher_dashboard_notifications(user)
 
         queryset = Notification.objects.filter(recipient=user)
         if request.GET.get('unread') in ('1', 'true', 'True'):
@@ -3118,10 +4601,13 @@ class NotificationListAPIView(APIView):
         notifications_data = [n.to_dict() for n in queryset]
         unread_count = Notification.objects.filter(recipient=user, is_read=False).count()
 
+        title = 'Teacher activity' if is_teacher else 'Your notifications'
+
         return JsonResponse({
             'success': True,
+            'is_teacher': is_teacher,
             'panel_info': {
-                'title': 'Your notifications',
+                'title': title,
                 'subtitle': 'Updates from your project workspace.',
                 'buttons': {
                     'cancel': 'Cancel',
@@ -3129,7 +4615,7 @@ class NotificationListAPIView(APIView):
                 }
             },
             'modal': {
-                'title': 'Your notifications',
+                'title': title,
                 'subtitle': 'Updates from your project workspace.',
                 'cancel_label': 'Cancel',
                 'close_label': 'Close',
@@ -3262,11 +4748,17 @@ class NotificationSeedAPIView(APIView):
     """
     POST /api/notifications/seed/
     POST /api/workspace/notifications/seed/
+    POST /api/teacher/activity/seed/
 
-    Seeds the 3 workspace notifications from the screenshot:
-    - Submission status ('Your last project is currently under review.', tag: 'Node Theory', 2h ago)
-    - Project update ('Your latest project activity is ready to review.', Today)
-    - Teacher reply ('Your teacher answered one of your questions.', Yesterday)
+    Seeds the 3 workspace notifications:
+    - Student:
+      - Submission status ('Your last project is currently under review.', tag: 'Node Theory', 2h ago)
+      - Project update ('Your latest project activity is ready to review.', Today)
+      - Teacher reply ('Your teacher answered one of your questions.', Yesterday)
+    - Teacher:
+      - Review queue ('3 student submissions are awaiting your feedback.', Today)
+      - Question received ('A student asked for clarification on project scope.', Today)
+      - Progress update ('The class is moving ahead on schedule.', Yesterday)
     """
 
     def post(self, request, *args, **kwargs):
@@ -3274,12 +4766,28 @@ class NotificationSeedAPIView(APIView):
         if not user:
             return JsonResponse({'success': False, 'code': 'UNAUTHORIZED', 'error': 'Authentication required.'}, status=401)
 
-        seed_student_dashboard_notifications(user)
+        is_teacher = (
+            user.is_staff or
+            getattr(user, 'account_type', '') in (AccountType.TEACHER, AccountType.FACULTY) or
+            request.GET.get('role') in ('teacher', 'faculty') or
+            (request.data and request.data.get('role') in ('teacher', 'faculty')) or
+            '/teacher/' in request.path or
+            'teacher-activity' in request.path
+        )
+
+        if is_teacher:
+            seed_teacher_dashboard_notifications(user)
+            msg = 'Teacher activity workspace notifications initialized successfully.'
+        else:
+            seed_student_dashboard_notifications(user)
+            msg = 'Sample student workspace notifications initialized successfully.'
+
         queryset = Notification.objects.filter(recipient=user)
 
         return JsonResponse({
             'success': True,
-            'message': 'Sample student workspace notifications initialized successfully.',
+            'is_teacher': is_teacher,
+            'message': msg,
             'count': queryset.count(),
             'notifications': [n.to_dict() for n in queryset]
         }, status=201)
@@ -3691,12 +5199,15 @@ csrf_token_view = CsrfTokenAPIView.as_view()
 
 # Workspace & Dashboard
 dashboard_view = DashboardAPIView.as_view()
+teacher_activity_view = TeacherActivityAPIView.as_view()
 
 # Projects
 project_list_create_view = ProjectListCreateAPIView.as_view()
 project_detail_view = ProjectDetailAPIView.as_view()
 project_submit_review_view = ProjectSubmitReviewAPIView.as_view()
 project_review_view = ProjectReviewAPIView.as_view()
+teacher_student_projects_view = TeacherStudentProjectsAPIView.as_view()
+teacher_student_project_detail_view = TeacherStudentProjectDetailAPIView.as_view()
 
 # Teams & Invitations
 my_team_view = MyTeamAPIView.as_view()
@@ -3709,6 +5220,10 @@ team_invitation_respond_view = TeamInvitationRespondAPIView.as_view()
 invitation_list_view = InvitationListAPIView.as_view()
 team_upload_project_view = TeamUploadProjectAPIView.as_view()
 team_candidates_view = TeamCandidatesAPIView.as_view()
+teacher_student_teams_projects_view = TeacherStudentTeamsProjectsAPIView.as_view()
+teacher_student_team_detail_view = TeacherStudentTeamDetailAPIView.as_view()
+teacher_student_team_remind_view = TeacherStudentTeamRemindAPIView.as_view()
+teacher_student_team_review_view = TeacherStudentTeamReviewAPIView.as_view()
 
 # Queries & Teacher Q&A
 query_list_create_view = QueryListCreateAPIView.as_view()
@@ -3735,6 +5250,9 @@ topic_list_view = TopicListAPIView.as_view()
 topic_upload_view = TopicUploadAPIView.as_view()
 topic_select_view = TopicSelectAPIView.as_view()
 topic_release_view = TopicReleaseAPIView.as_view()
+topic_detail_view = TopicDetailAPIView.as_view()
+topic_assign_guide_view = TopicAssignGuideAPIView.as_view()
+topic_export_view = TopicExportAPIView.as_view()
 
 # Project Files
 project_file_upload_view = ProjectFileUploadAPIView.as_view()

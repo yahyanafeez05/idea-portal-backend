@@ -229,6 +229,7 @@ class ProjectStatus(models.TextChoices):
     DRAFT = 'draft', _('Draft')
     NOT_STARTED = 'not_started', _('Not started')
     IN_PROGRESS = 'in_progress', _('In progress')
+    SUBMITTED = 'submitted', _('Submitted')
     AWAITING_REVIEW = 'awaiting_review', _('Awaiting review')
     APPROVED = 'approved', _('Approved')
     REJECTED = 'rejected', _('Rejected')
@@ -659,6 +660,8 @@ class Project(models.Model):
         verbose_name=_('Reviewed By')
     )
     reviewed_at = models.DateTimeField(_('Reviewed At'), null=True, blank=True)
+    submitted_at = models.DateTimeField(_('Submitted At'), null=True, blank=True)
+    grade = models.CharField(_('Grade'), max_length=50, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -673,6 +676,8 @@ class Project(models.Model):
     def save(self, *args, **kwargs):
         if not self.department and self.owner:
             self.department = self.owner.department
+        if self.status in (ProjectStatus.SUBMITTED, ProjectStatus.AWAITING_REVIEW, ProjectStatus.APPROVED) and not self.submitted_at:
+            self.submitted_at = timezone.now()
         super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
@@ -687,22 +692,66 @@ class Project(models.Model):
         super().delete(*args, **kwargs)
 
     def to_dict(self):
+        owner_name = self.owner.full_name if self.owner else ''
+        owner_email = self.owner.email if self.owner else ''
+        owner_dept = self.owner.department if self.owner else ''
+        owner_initial = owner_name[0].upper() if owner_name else (owner_email[0].upper() if owner_email else 'S')
+
+        # Status badge metadata
+        if self.status == ProjectStatus.REJECTED:
+            badge_label = 'Needs changes'
+            badge_color = 'red'
+        elif self.status in (ProjectStatus.AWAITING_REVIEW, ProjectStatus.SUBMITTED):
+            badge_label = self.get_status_display()
+            badge_color = 'amber'
+        elif self.status == ProjectStatus.APPROVED:
+            badge_label = 'Approved'
+            badge_color = 'green'
+        elif self.status == ProjectStatus.COMPLETED:
+            badge_label = 'Completed'
+            badge_color = 'emerald'
+        elif self.status == ProjectStatus.IN_PROGRESS:
+            badge_label = 'In progress'
+            badge_color = 'cyan'
+        else:
+            badge_label = self.get_status_display()
+            badge_color = 'grey'
+
+        files_list = [f.to_dict() for f in self.files.all()[:20]] if hasattr(self, 'files') else []
+
+        effective_submitted_at = self.submitted_at or (self.updated_at if self.status in (ProjectStatus.SUBMITTED, ProjectStatus.AWAITING_REVIEW, ProjectStatus.APPROVED, ProjectStatus.REJECTED) else None)
+
         return {
             'id': self.id,
             'title': self.title,
             'description': self.description,
             'owner': {
-                'id': self.owner.id,
-                'full_name': self.owner.full_name,
-                'email': self.owner.email,
-                'department': self.owner.department,
+                'id': self.owner.id if self.owner else None,
+                'full_name': owner_name,
+                'email': owner_email,
+                'department': owner_dept,
             },
+            'student': {
+                'id': self.owner.id if self.owner else None,
+                'full_name': owner_name,
+                'name': owner_name,
+                'email': owner_email,
+                'department': owner_dept,
+                'avatar_initial': owner_initial,
+                'chat_url': f"/workspace/chat/{owner_email}/" if owner_email else None,
+            },
+            'student_name': owner_name,
+            'student_email': owner_email,
             'team': {'id': self.team.id, 'name': self.team.name} if self.team else None,
             'team_name': self.team.name if self.team else None,
             'is_team_project': bool(self.team_id),
             'department': self.department,
             'status': self.status,
-            'status_display': self.get_status_display(),
+            'status_display': badge_label,
+            'status_badge': {
+                'label': badge_label,
+                'color': badge_color,
+            },
             'progress': self.progress,
             'progress_display': f"{self.progress}%",
             'is_selected': self.is_selected or bool(self.topic),
@@ -715,13 +764,41 @@ class Project(models.Model):
             'github_url': self.github_url,
             'live_url': self.live_url,
             'feedback': self.feedback,
+            'grade': self.grade,
             'reviewed_by': self.reviewed_by.full_name if self.reviewed_by else None,
             'reviewed_at': self.reviewed_at.isoformat() if self.reviewed_at else None,
+            'submitted_at': effective_submitted_at.isoformat() if effective_submitted_at else None,
+            'formatted_submitted_at': effective_submitted_at.strftime('%b %d, %Y, %I:%M %p').replace(' 0', ' ') if effective_submitted_at else '',
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'formatted_created_at': self.created_at.strftime('%b %d, %Y') if self.created_at else '',
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
-            'files_count': self.files.count() if hasattr(self, 'files') else 0,
-            'files': [f.to_dict() for f in self.files.all()[:10]] if hasattr(self, 'files') else [],
+            'files_count': len(files_list),
+            'files': files_list,
+            'submission_info': {
+                'status': self.status,
+                'status_display': badge_label,
+                'submitted_at': effective_submitted_at.isoformat() if effective_submitted_at else None,
+                'formatted_submitted_at': effective_submitted_at.strftime('%b %d, %Y, %I:%M %p').replace(' 0', ' ') if effective_submitted_at else '',
+                'github_url': self.github_url,
+                'live_url': self.live_url,
+                'has_files': bool(len(files_list) > 0),
+                'files_count': len(files_list),
+                'feedback': self.feedback,
+                'grade': self.grade,
+                'reviewed_by': self.reviewed_by.full_name if self.reviewed_by else None,
+                'reviewed_at': self.reviewed_at.isoformat() if self.reviewed_at else None,
+            },
+            'options': {
+                'can_review': True,
+                'can_approve': True,
+                'can_request_changes': True,
+                'review_url': f"/api/projects/{self.id}/review/",
+                'feedback_url': f"/api/projects/{self.id}/review/",
+                'files_url': f"/api/projects/{self.id}/files/",
+                'upload_file_url': f"/api/projects/{self.id}/files/",
+                'view_details_url': f"/api/projects/{self.id}/",
+                'chat_student_url': f"/workspace/chat/{owner_email}/" if owner_email else None,
+            }
         }
 
 
@@ -851,11 +928,30 @@ class Query(models.Model):
 
         is_me = bool(current_user and current_user.id == self.asked_by_id)
 
+        formatted_datetime = self.created_at.strftime('%b %d, %Y, %I:%M %p').replace(' 0', ' ') if self.created_at else ''
+        student_name = self.asked_by.full_name if self.asked_by else 'Student'
+        subtext = f"Submitted by {student_name} · {formatted_datetime}" if self.created_at else ''
+        action_button = 'Edit answer' if self.response else 'Answer question'
+        modal_info = {
+            'title': 'Question details',
+            'subtitle': f"Question from {student_name}",
+            'question': self.title,
+            'details': self.description,
+            'your_answer': self.response or '',
+            'answer': self.response or '',
+            'buttons': {
+                'cancel': 'Cancel',
+                'save': 'Save answer'
+            },
+            'endpoint': f"/api/queries/{self.id}/reply/"
+        }
+
         return {
             'id': self.id,
             'title': self.title,
+            'question': self.title,
+            'details': self.description,
             'description': self.description,
-            'question': self.description,
             'project': {'id': self.project.id, 'title': self.project.title} if self.project else None,
             'asked_by': {
                 'id': self.asked_by.id,
@@ -864,19 +960,27 @@ class Query(models.Model):
                 'department': getattr(self.asked_by, 'department', ''),
                 'initial': asked_by_initial,
             },
+            'student_name': student_name,
             'is_me': is_me,
             'status': self.status,
             'status_display': self.get_status_display(),
+            'indicator_dot': 'green',
+            'subtext': subtext,
+            'submitted_subtext': subtext,
+            'action_button': action_button,
+            'modal': modal_info,
             'has_reply': bool(self.response),
             'has_answer': bool(self.response),
             'response': self.response,
             'answer': self.response,
+            'your_answer': self.response or '',
             'responded_by': responded_by_data,
             'responded_by_name': self.responded_by.full_name if self.responded_by else None,
             'responded_at': self.responded_at.isoformat() if self.responded_at else None,
             'formatted_responded_at': self.responded_at.strftime('%b %d, %Y %I:%M %p') if self.responded_at else '',
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'formatted_created_at': self.created_at.strftime('%b %d, %Y') if self.created_at else '',
+            'formatted_datetime': formatted_datetime,
             'formatted_time': self.created_at.strftime('%I:%M %p') if self.created_at else '',
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -1100,6 +1204,9 @@ class NotificationType(models.TextChoices):
     TEAM_LEADER_ASSIGNED = 'team_leader_assigned', _('Team Leader Assigned')
     TEAM_MESSAGE = 'team_message', _('Team Message')
     MESSAGE = 'message', _('New Message')
+    REVIEW_QUEUE = 'review_queue', _('Review queue')
+    QUESTION_RECEIVED = 'question_received', _('Question received')
+    PROGRESS_UPDATE = 'progress_update', _('Progress update')
 
 
 class Notification(models.Model):
@@ -1150,6 +1257,8 @@ class Notification(models.Model):
             elif seconds < 86400:
                 if (now.date() - self.created_at.date()).days == 1:
                     relative_time = "Yesterday"
+                elif self.notification_type in ('review_queue', NotificationType.REVIEW_QUEUE, 'question_received', NotificationType.QUESTION_RECEIVED):
+                    relative_time = "Today"
                 elif seconds <= 4 * 3600:
                     relative_time = f"{max(1, seconds // 3600)}h ago"
                 else:
@@ -1163,7 +1272,12 @@ class Notification(models.Model):
                 else:
                     relative_time = self.created_at.strftime('%b %d')
 
-        tag_val = self.tag or ("Node Theory" if (self.notification_type in (NotificationType.SUBMISSION_STATUS, 'submission_status') or 'review' in self.message.lower()) else "")
+        if self.tag:
+            tag_val = self.tag
+        elif self.notification_type in ('review_queue', 'question_received', 'progress_update', NotificationType.REVIEW_QUEUE, NotificationType.QUESTION_RECEIVED, NotificationType.PROGRESS_UPDATE):
+            tag_val = ""
+        else:
+            tag_val = "Node Theory" if (self.notification_type in (NotificationType.SUBMISSION_STATUS, 'submission_status') or (self.notification_type == NotificationType.INFO and 'review' in self.message.lower())) else ""
 
         return {
             'id': self.id,
@@ -1172,8 +1286,8 @@ class Notification(models.Model):
             'description': self.message,
             'notification_type': self.notification_type,
             'notification_type_display': self.get_notification_type_display(),
-            'tag': tag_val if tag_val else None,
-            'badge': tag_val if tag_val else None,
+            'tag': tag_val if tag_val else "",
+            'badge': tag_val if tag_val else "",
             'time_ago': relative_time,
             'relative_time': relative_time,
             'formatted_time': self.created_at.strftime('%I:%M %p') if self.created_at else '',
