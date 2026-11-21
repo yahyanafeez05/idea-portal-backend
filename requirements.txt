@@ -2,3 +2,4 @@ flask
 gunicorn
 django
 gunicorn
+django-cors-headers
