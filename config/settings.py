@@ -142,3 +142,11 @@ MAILERS = {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
     },
 }
+CORS_ALLOWED_ORIGINS = [
+    "http://127.0.0.1:5500",              # local testing, optional
+    "https://idea-portal-frontend-plum.vercel.app",     # your Vercel site
+]
+CSRF_TRUSTED_ORIGINS = [
+    "https://idea-portal-frontend-plum.vercel.app",
+]
+    ALLOWED_HOSTS = ["localhost", "127.0.0.1", ".onrender.com"]
